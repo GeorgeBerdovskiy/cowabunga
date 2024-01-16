@@ -1,8 +1,10 @@
 from lstore.table import Table
+from lstore.logger import Logger, LogType
 
 class Database():
 
     def __init__(self):
+        self.logger = Logger()
         self.tables = []
         pass
 
@@ -20,7 +22,10 @@ class Database():
     :param key: int             #Index of table key in columns
     """
     def create_table(self, name, num_columns, key_index):
+        self.logger.log(LogType.INFO, __file__, f'Creating table "{name}" with {num_columns} columns and key index {key_index}...')
         table = Table(name, num_columns, key_index)
+
+        self.logger.log(LogType.INFO, __file__, f'Returning new table "{name}"')
         return table
 
     
