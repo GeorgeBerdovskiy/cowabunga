@@ -2,6 +2,9 @@ from lstore.db import Database
 from lstore.query import Query
 from time import process_time
 from random import choice, randrange
+from ecs_165_database import hello_from_rust
+
+print(hello_from_rust())
 
 # Student Id and 4 grades
 db = Database()
