@@ -22,20 +22,20 @@ class Database():
     :param key: int             #Index of table key in columns
     """
     def create_table(self, name, num_columns, key_index):
-        self.logger.log(LogType.INFO, __file__, f'Creating table "{name}" with {num_columns} columns and key index {key_index}...')
+        self.logger.logt(LogType.INFO, __file__, f'Creating table "{name}" with {num_columns} columns and key index {key_index}...')
         table = Table(name, num_columns, key_index)
 
-        self.logger.log(LogType.INFO, __file__, f'Returning new table "{name}"')
+        self.logger.logt(LogType.INFO, __file__, f'Returning new table "{name}"')
         return table
 
-    
+
     """
     # Deletes the specified table
     """
     def drop_table(self, name):
         pass
 
-    
+
     """
     # Returns table with the passed name
     """
