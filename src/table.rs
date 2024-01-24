@@ -1,52 +1,63 @@
-use std::marker::PhantomData;
+use std::collections::HashMap;
+use std::io;
+
 use pyo3::prelude::*;
 
-/// Represents record IDs (RIDs). This struct may not be necessary, but improves documentation
-#[pyclass]
+/// Represents record IDs (RIDs), which are _physical_.
 struct RID {
-    /// Internal representation of an RID as a 64-bit signed integer
-    _rid: i64
+    /// Index of the page that contains this record
+    page: usize,
+
+    /// Index of the slot that contains this record
+    slot: usize
 }
 
-/// Represents a table.
+/// Represents a table. According to the L-Store architecture, a table is really just an index,
+/// a collection of base pages, and a collection of tail pages.
 #[pyclass]
 struct Table {
-    /// Represents the indirection column. Every RID points to the next most recent record, and
-    /// updated records will usually be found in two or three hops.
-    indirection: Vec<RID>
+    /// Name of the table
+    name: String,
+
+    /// Map from logical IDs to record IDs
+    lid_to_rid: HashMap<i64, RID>,
+
+    /// Number of columns in the table
+    number_of_columns: i32, // NOTE - This could be smaller?
+
+    /// Set of table's base pages
+    base_pages: Vec<Page>,
+
+    /// Set of table's tail pages
+    tail_pages: Vec<Page>
 }
 
 impl Table {
     /// Create a new empty table
-    pub fn new() -> Self {
-        Table { indirection: Vec::new() }
+    pub fn new(name: String, number_of_columns: i32) -> Self {
+        Table {
+            name, number_of_columns,
+            lid_to_rid: HashMap::new(),
+            base_pages: Vec::new(),
+            tail_pages: Vec::new()
+        }
+    }
+
+    /// Insert a new record. If the record is successfully inserted, return `Ok()`. Otherwise,
+    /// return `Err(io::Error)`.
+    pub fn insert() -> Result<(), io::Error> {
+        unimplemented!()
     }
 }
 
-/// Empty struct that represents a base page when included as a generic type argument to `Page<T>`.
-#[derive(Debug)]
-struct Base();
-
-/// Empty struct that represents a tail page when included as a generic type argument to `Page<T>`.
-#[derive(Debug)]
-struct Tail();
-
-/// Represents either a base or tail page.
-/// 
-/// Since both are _physically_ the same, we distinguish them using the generic type
-/// parameter `T`, which can either be `Base` or `Tail`.
-/// 
-/// Ideally, implementations for `Page<Base>` and `Page<Tail>` will be different to
-/// improve code readability and prevent improper page usage.
-struct Page<T> {
-    phantom: PhantomData<T>
+/// Represents either a base or tail page. Note that the `Base` and `Tail` variants both contain
+/// `Vec<Column>` because they are _logical_ constructs. Physically, there is no difference between them.
+enum Page {
+    Base([ColumnPage; 1024]),
+    Tail([ColumnPage; 1024])
 }
 
-/// Represents a single column, which has an index, a set of base records, and a set of base pages.
-/// 
-/// This representation may be incorrect. If it is, expect changes soon.
-struct Column {
-    index: i64,
-    base_records: Vec<Page<Base>>,
-    tail_records: Vec<Page<Tail>>
+/// Represents a column. You can think of a column as a "column page"
+struct ColumnPage {
+    records: Vec<i64>
 }
