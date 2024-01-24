@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 use pyo3::prelude::*;
 
 /// Represents record IDs (RIDs), which are _physical_.
+#[derive(Debug)]
 struct RID {
     /// Index of the page that contains this record
     page: usize,
@@ -54,6 +55,7 @@ impl Table {
     /// Format as a string for printing in Python.
     pub fn __str__(&self) -> PyResult<String> {
         let string = format!("{}\n---------\n", self.name);
+        let string = string + &format!("{:?}", self.lid_to_rid) + "\n------\n";
         let string = string + &format!("{:?}", self.base_pages);
 
         Ok(string)
@@ -85,6 +87,10 @@ impl Table {
             page.columns[next_col_index].insert_record(*col);
             next_col_index += 1;
         }
+
+        let page_index = base_page_length;
+        let slot_index = page.columns[0].records.len() - 1;
+        self.lid_to_rid.insert(columns[0], RID { page: page_index, slot: slot_index });
 
         Ok(())
     }
