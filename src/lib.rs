@@ -1,6 +1,7 @@
-use pyo3::prelude::*;
+use pyo3::{prelude::*, wrap_pymodule};
 
 mod table;
+mod bufferpool;
 
 /// Formats the sum of two numbers as string.
 #[pyfunction]
@@ -13,10 +14,17 @@ fn hello_from_rust() -> PyResult<String> {
     Ok("Hello from Rust!".to_string())
 }
 
+#[pymodule]
+fn table_module(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<table::Table>()?;
+    Ok(())
+}
+
 /// A Python module implemented in Rust.
 #[pymodule]
 fn ecs_165_database(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
     m.add_function(wrap_pyfunction!(hello_from_rust, m)?)?;
+    m.add_wrapped(wrap_pymodule!(table_module))?;
     Ok(())
 }

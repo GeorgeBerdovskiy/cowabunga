@@ -15,7 +15,7 @@ struct RID {
 /// Represents a table. According to the L-Store architecture, a table is really just an index,
 /// a collection of base pages, and a collection of tail pages.
 #[pyclass]
-struct Table {
+pub struct Table {
     /// Name of the table
     name: String,
 
@@ -23,7 +23,7 @@ struct Table {
     lid_to_rid: HashMap<i64, RID>,
 
     /// Number of columns in the table
-    number_of_columns: i32, // NOTE - This could be smaller?
+    number_of_columns: usize,
 
     /// Set of table's base pages
     base_pages: Vec<Page>,
@@ -32,32 +32,61 @@ struct Table {
     tail_pages: Vec<Page>
 }
 
+#[pymethods]
 impl Table {
     /// Create a new empty table
-    pub fn new(name: String, number_of_columns: i32) -> Self {
+    #[new]
+    pub fn new(name: String, number_of_columns: usize) -> Self {
         Table {
             name, number_of_columns,
             lid_to_rid: HashMap::new(),
-            base_pages: Vec::new(),
-            tail_pages: Vec::new()
+            base_pages: vec![Page::Base(Vec::new())],
+            tail_pages: vec![Page::Tail(Vec::new())]
         }
     }
 
     /// Insert a new record. If the record is successfully inserted, return `Ok()`. Otherwise,
-    /// return `Err(io::Error)`.
-    pub fn insert() -> Result<(), io::Error> {
-        unimplemented!()
+    /// return `Err(String)`.
+    pub fn insert(&mut self, columns: Vec<i64>) -> PyResult<()> {
+        if columns.len() != self.number_of_columns {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Wrong number of columns",
+            ));
+        }
+
+        // The first key is our LID - make sure it doesn't exist yet
+        if self.lid_to_rid.contains_key(&columns[0]) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Record with this ID already exists",
+            ));
+        }
+
+        match self.base_pages.last() {
+            Some(Page::Base(base_page)) => {
+                println!("[DEBUG] Adding to base page...")
+            },
+
+            Some(Page::Tail(tail_page)) => {
+                panic!("[ERROR] Base pages vector contains tail page.")
+            }
+
+            None => {
+                panic!("[ERROR] Table has no base pages.")
+            }
+        }
+
+        Ok(())
     }
 }
 
 /// Represents either a base or tail page. Note that the `Base` and `Tail` variants both contain
 /// `Vec<Column>` because they are _logical_ constructs. Physically, there is no difference between them.
-enum Page {
-    Base([ColumnPage; 1024]),
-    Tail([ColumnPage; 1024])
+pub enum Page {
+    Base(Vec<ColumnPage>),
+    Tail(Vec<ColumnPage>)
 }
 
 /// Represents a column. You can think of a column as a "column page"
-struct ColumnPage {
+pub struct ColumnPage {
     records: Vec<i64>
 }
