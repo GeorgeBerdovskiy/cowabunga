@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io;
+use std::marker::PhantomData;
 
 use pyo3::prelude::*;
 
@@ -26,23 +26,37 @@ pub struct Table {
     number_of_columns: usize,
 
     /// Set of table's base pages
-    base_pages: Vec<Page>,
+    base_pages: Vec<Page<Base>>,
 
     /// Set of table's tail pages
-    tail_pages: Vec<Page>
+    tail_pages: Vec<Page<Tail>>
 }
 
 #[pymethods]
 impl Table {
-    /// Create a new empty table
+    /// Create a new empty table.
     #[new]
     pub fn new(name: String, number_of_columns: usize) -> Self {
         Table {
             name, number_of_columns,
             lid_to_rid: HashMap::new(),
-            base_pages: vec![Page::Base(Vec::new())],
-            tail_pages: vec![Page::Tail(Vec::new())]
+            base_pages: vec![Page {
+                columns: vec![ColumnPage::new(); number_of_columns],
+                phantom: PhantomData::<Base>
+            }],
+            tail_pages: vec![Page {
+                columns: vec![ColumnPage::new(); number_of_columns],
+                phantom: PhantomData::<Tail>
+            }]
         }
+    }
+
+    /// Format as a string for printing in Python.
+    pub fn __str__(&self) -> PyResult<String> {
+        let string = format!("{}\n---------\n", self.name);
+        let string = string + &format!("{:?}", self.base_pages);
+
+        Ok(string)
     }
 
     /// Insert a new record. If the record is successfully inserted, return `Ok()`. Otherwise,
@@ -61,18 +75,15 @@ impl Table {
             ));
         }
 
-        match self.base_pages.last() {
-            Some(Page::Base(base_page)) => {
-                println!("[DEBUG] Adding to base page...")
-            },
+        let base_page_length = self.base_pages.len() - 1;
+        let page = &mut self.base_pages[base_page_length];
 
-            Some(Page::Tail(tail_page)) => {
-                panic!("[ERROR] Base pages vector contains tail page.")
-            }
+        let next_col = columns.iter();
+        let mut next_col_index: usize = 0;
 
-            None => {
-                panic!("[ERROR] Table has no base pages.")
-            }
+        for col in next_col {
+            page.columns[next_col_index].insert_record(*col);
+            next_col_index += 1;
         }
 
         Ok(())
@@ -81,12 +92,33 @@ impl Table {
 
 /// Represents either a base or tail page. Note that the `Base` and `Tail` variants both contain
 /// `Vec<Column>` because they are _logical_ constructs. Physically, there is no difference between them.
-pub enum Page {
-    Base(Vec<ColumnPage>),
-    Tail(Vec<ColumnPage>)
+#[derive(Debug)]
+pub struct Base();
+
+#[derive(Debug)]
+pub struct Tail();
+
+#[derive(Debug)]
+pub struct Page<T> {
+    columns: Vec<ColumnPage>,
+    phantom: PhantomData<T>
 }
 
 /// Represents a column. You can think of a column as a "column page"
+#[derive(Debug)]
+#[derive(Clone)]
 pub struct ColumnPage {
     records: Vec<i64>
+}
+
+impl ColumnPage {
+    pub fn new() -> Self {
+        ColumnPage {
+            records: Vec::new()
+        }
+    }
+
+    pub fn insert_record(&mut self, value: i64) {
+        self.records.push(value)
+    }
 }

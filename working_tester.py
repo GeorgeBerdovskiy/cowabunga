@@ -11,3 +11,4 @@ query = Query(grades_table)
 
 rust_table = table_module.Table("Grades", 5)
 rust_table.insert([192, 232, 232, 232, 90])
+print(rust_table)
