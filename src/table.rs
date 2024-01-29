@@ -148,7 +148,10 @@ impl Table {
             lid_to_rid: HashMap::new(),
             next_base_rid: 0,
             next_tail_rid: 0,
-            columns: vec![Column::new(); number_of_columns]
+
+            /// Table columns. The first two are the _indirection_ and _schema encoding_ columns,
+            /// repsectively. The rest are defined by the user.
+            columns: vec![Column::new(); number_of_columns + 2]
         }
     }
 
@@ -165,7 +168,10 @@ impl Table {
         let page_index = self.next_base_rid / CELLS_PER_PAGE;
         let cell_index = self.next_base_rid % CELLS_PER_PAGE;
 
-        for column in self.columns.iter_mut().zip(columns.iter()) {
+        self.columns[0].insert_base(page_index, cell_index, None);
+        self.columns[1].insert_base(page_index, cell_index, Some(-1));
+
+        for column in self.columns.iter_mut().skip(2).zip(columns.iter()) {
             column.0.insert_base(page_index, cell_index, Some(*column.1));
         }
 
@@ -196,7 +202,7 @@ impl Table {
         let page_index = self.next_tail_rid / CELLS_PER_PAGE;
         let cell_index = self.next_tail_rid % CELLS_PER_PAGE;
 
-        for column in self.columns.iter_mut().zip(columns.iter()) {
+        for column in self.columns.iter_mut().skip(2).zip(columns.iter()) {
             column.0.insert_tail(page_index, cell_index, *column.1);
         }
 
@@ -204,6 +210,9 @@ impl Table {
             raw_rid: self.next_tail_rid,
             base: false
         });
+
+        self.columns[0].insert_tail(page_index, cell_index, Some(prev_rid.as_ref().unwrap().raw_rid as i64));
+        self.columns[1].insert_tail(page_index, cell_index, Some(if prev_rid.as_ref().unwrap().base {1} else {0}));
 
         println!("[INFO] Updated record w/ID {:?} with RID {:?} -> {}.", columns[0], prev_rid, self.next_tail_rid);
         self.next_tail_rid += 1;
@@ -215,6 +224,7 @@ impl Table {
     /// always the first column.
     // TODO - Move to `Query`
     pub fn select(&mut self, key: i64) -> PyResult<Record> {
+        // This is horrible and rushed! Absolutely come back to this
         match self.lid_to_rid.get(&key) {
             Some(rid) => {
                 let page_index = rid.raw_rid / CELLS_PER_PAGE;
@@ -230,7 +240,41 @@ impl Table {
                         result.push(column.read_base(page_index, cell_index));
                     } else {
                         println!("[DEBUG] Adding tail record column.");
-                        result.push(column.read_tail(page_index, cell_index));
+                        let mut col_val = column.read_tail(page_index, cell_index);
+
+                        // We may need to travel backwards to get the value of this column
+                        let mut last_rid = RID {
+                            raw_rid: rid.raw_rid,
+                            base: rid.base
+                        };
+                        let mut last_rid_page = rid.raw_rid / 512;
+                        let mut last_rid_cell = rid.raw_rid % 512;
+
+                        while col_val.is_none() {
+                            // This probably won't work on 32 bit systems... rewrite
+                            if last_rid.base {
+                                last_rid = RID {
+                                    raw_rid: self.columns[0].read_base(last_rid_page, last_rid_cell).unwrap() as usize,
+                                    base: if self.columns[1].read_base(last_rid_page, last_rid_cell).unwrap() == 1 {true} else {false}
+                                };
+                            } else {
+                                last_rid = RID {
+                                    raw_rid: self.columns[0].read_tail(last_rid_page, last_rid_cell).unwrap() as usize,
+                                    base: if self.columns[1].read_tail(last_rid_page, last_rid_cell).unwrap() == 1 {true} else {false}
+                                };
+                            }
+
+                            last_rid_page = last_rid.raw_rid / 512;
+                            last_rid_cell = last_rid.raw_rid % 512;
+
+                            col_val = if last_rid.base {
+                                column.read_base(last_rid_page, last_rid_cell)
+                            } else {
+                                column.read_tail(last_rid_page, last_rid_cell)
+                            }
+                        }
+
+                        result.push(col_val);
                     }
                 }
 
