@@ -1,3 +1,4 @@
+use std::cell;
 use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::pyclass;
@@ -7,7 +8,7 @@ const CELLS_PER_PAGE: usize = 512;
 
 /// Contains one record field. Because all fields are 64 bit integers, we use `i64`.
 /// If a field has been written, it contains `Some(i64)`. Otherwise, it holds `None`.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct Cell(Option<i64>);
 
 impl Cell {
@@ -26,6 +27,7 @@ impl Cell {
 /// each has a size of **4096 bytes.** In order to calculate the physical location of a record,
 /// we divide the RID by 512 for the page index and calculate the remainder for the offset (or
 /// cell index).
+#[derive(Clone, Copy, Debug)]
 struct Page {
     /// Fixed size array of cells.
     cells: [Cell; CELLS_PER_PAGE],
@@ -48,6 +50,10 @@ impl Page {
         self.cells[offset] = Cell::new(value);
         self.cell_count += 1;
     }
+
+    pub fn read(&self, offset: usize) -> Option<i64> {
+        self.cells[offset].0
+    }
 }
 
 /// Represents the RID (record identifier) of a record. The struct isn't required, but benefits
@@ -59,7 +65,10 @@ impl Page {
 #[derive(Debug)]
 struct RID {
     /// Index of the page that contains this record
-    _inner: usize
+    raw_rid: usize,
+
+    /// True if this RID refers to a base page, false otherwise
+    base: bool
 }
 
 /// Represents a table, including all of its indexes, pages, and RID mappings.
@@ -90,6 +99,7 @@ pub struct Table {
     columns: Vec<Column>
 }
 
+#[derive(Clone, Debug)]
 struct Column {
     base_pages: Vec<Page>,
     tail_pages: Vec<Page>
@@ -104,7 +114,27 @@ impl Column {
     }
 
     pub fn insert_base(&mut self, page_index: usize, cell_index: usize, value: Option<i64>) {
-        self.base_pages[page_index].write(page_index, value);
+        if self.base_pages.len() <= page_index {
+            self.base_pages.push(Page::new())
+        }
+
+        self.base_pages[page_index].write(cell_index, value);
+    }
+
+    pub fn insert_tail(&mut self, page_index: usize, cell_index: usize, value: Option<i64>) {
+        if self.tail_pages.len() <= page_index {
+            self.tail_pages.push(Page::new())
+        }
+
+        self.tail_pages[page_index].write(cell_index, value);
+    }
+
+    pub fn read_base(&self, page_index: usize, cell_index: usize) -> Option<i64> {
+        self.base_pages[page_index].read(cell_index)
+    }
+
+    pub fn read_tail(&self, page_index: usize, cell_index: usize) -> Option<i64> {
+        self.tail_pages[page_index].read(cell_index)
     }
 }
 
@@ -118,29 +148,101 @@ impl Table {
             lid_to_rid: HashMap::new(),
             next_base_rid: 0,
             next_tail_rid: 0,
-            columns: Vec::new()
+            columns: vec![Column::new(); number_of_columns]
         }
     }
 
     /// Insert a new record with the columns in `columns`. Note that values may be `None`.
+    /// Returns the ID of your inserted record if successful and an error otherwise.
     // TODO - Move to `Query`
-    pub fn insert(&mut self, columns: Vec<Option<i64>>) {
+    pub fn insert(&mut self, columns: Vec<i64>) -> PyResult<i64> {
+        if self.lid_to_rid.contains_key(&columns[0]) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Record with this ID already exists.",
+            ));
+        }
+
         let page_index = self.next_base_rid / CELLS_PER_PAGE;
         let cell_index = self.next_base_rid % CELLS_PER_PAGE;
 
         for column in self.columns.iter_mut().zip(columns.iter()) {
-            column.0.insert_base(page_index, cell_index, *column.1);
+            column.0.insert_base(page_index, cell_index, Some(*column.1));
         }
+
+        self.lid_to_rid.insert(columns[0], RID {
+            raw_rid: self.next_base_rid,
+            base: true
+        });
 
         self.next_base_rid += 1;
         println!("[INFO] Inserted base record {:?} with RID {}.", columns, self.next_base_rid);
+
+        Ok(columns[0])
+    }
+
+    pub fn update(&mut self, columns: Vec<Option<i64>>) -> PyResult<i64> {
+        if columns[0].is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot have 'None' key.",
+            ));
+        }
+
+        if !self.lid_to_rid.contains_key(&columns[0].unwrap()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "No record with this ID exists.",
+            ));
+        }
+
+        let page_index = self.next_tail_rid / CELLS_PER_PAGE;
+        let cell_index = self.next_tail_rid % CELLS_PER_PAGE;
+
+        for column in self.columns.iter_mut().zip(columns.iter()) {
+            column.0.insert_tail(page_index, cell_index, *column.1);
+        }
+
+        let prev_rid = self.lid_to_rid.insert(columns[0].unwrap(), RID {
+            raw_rid: self.next_tail_rid,
+            base: false
+        });
+
+        println!("[INFO] Updated record w/ID {:?} with RID {:?} -> {}.", columns[0], prev_rid, self.next_tail_rid);
+        self.next_tail_rid += 1;
+
+        Ok(columns[0].unwrap())
     }
 
     /// Select a logical record given its LID. Assume for now that `key` is the LID and is
     /// always the first column.
     // TODO - Move to `Query`
-    pub fn select(&mut self, key: i64) -> Record {
-        unimplemented!()
+    pub fn select(&mut self, key: i64) -> PyResult<Record> {
+        match self.lid_to_rid.get(&key) {
+            Some(rid) => {
+                let page_index = rid.raw_rid / CELLS_PER_PAGE;
+                let cell_index = rid.raw_rid % CELLS_PER_PAGE;
+
+                let mut result: Vec<Option<i64>> = Vec::new();
+
+                println!("[DEBUG] Preparing to grab columns...");
+
+                for column in self.columns.iter() {
+                    if rid.base {
+                        println!("[DEBUG] Adding base record column.");
+                        result.push(column.read_base(page_index, cell_index));
+                    } else {
+                        println!("[DEBUG] Adding tail record column.");
+                        result.push(column.read_tail(page_index, cell_index));
+                    }
+                }
+
+                Ok(Record {
+                    columns: result
+                })
+            },
+
+            None => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "No record with this ID exists.",
+            ))
+        }
     }
 }
 
@@ -156,4 +258,19 @@ struct Query {
 #[pyclass]
 pub struct Record {
     columns: Vec<Option<i64>>
+}
+
+#[pymethods]
+impl Record {
+    pub fn __str__(&self) -> PyResult<String> {
+        let mut result = String::from("[");
+
+        for column in self.columns.iter() {
+            result = result + &format!("{:?}, ", column.or_else(|| None));
+        }
+
+        result += "]";
+
+        Ok(result)
+    }
 }
