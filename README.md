@@ -1,4 +1,4 @@
-# -165a-winter-2024
+# CowabungaDB
 
 ## Setup
 
