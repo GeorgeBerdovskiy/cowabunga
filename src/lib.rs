@@ -1,5 +1,6 @@
 use pyo3::{prelude::*, wrap_pymodule};
 
+mod bufferpool;
 mod table;
 
 /// Formats the sum of two numbers as string.

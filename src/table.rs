@@ -26,7 +26,7 @@ impl Cell {
 /// we divide the RID by 512 for the page index and calculate the remainder for the offset (the
 /// cell index).
 #[derive(Clone, Copy, Debug)]
-struct Page {
+pub struct Page {
     /// Fixed size array of cells.
     cells: [Cell; CELLS_PER_PAGE],
 
@@ -44,10 +44,15 @@ impl Page {
     }
 
     /// Write a new record to a physical page. For now, assume the offset is always valid.
-    pub fn write(&mut self, offset: usize, value: Option<i64>) {
-        // TODO: Ensure that `offset` is within the acceptable range and return an error if it isn't.
+    pub fn write(&mut self, offset: usize, value: Option<i64>) -> Result<(), ()> {
+        if offset >= self.cells.len() {
+            return Err(());
+        }
+
         self.cells[offset] = Cell::new(value);
         self.cell_count += 1;
+
+        Ok(())
     }
 
     /// Read a single cell from a physical page. For now, assume the offset is always valid.
