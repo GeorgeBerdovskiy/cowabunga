@@ -1,15 +1,13 @@
-// (Milestone One) Handle reads, writes, and creation of physical pages _in memory_ only.
-
 use pyo3::{pyclass, pymethods};
 
-/// Number of cells that can be stored in a page.
-const CELLS_PER_PAGE: usize = 512;
+use crate::constants::*;
 
 /// Contains one record field. Because all fields are 64 bit integers, we use `i64`.
 /// If a field has been written, it contains `Some(i64)`. Otherwise, it holds `None`.
 #[derive(Copy, Clone, Debug)]
 struct Cell(Option<i64>);
 
+/// Represents the index of a page.
 pub type PageIdentifier = usize;
 
 impl Cell {
@@ -59,6 +57,7 @@ impl Page {
         Ok(self.cell_count - 1)
     }
 
+    /// Write a value to the next available cell in this page.
     pub fn write_next(&mut self, value: Option<i64>) -> Result<usize, ()> {
         self.write(self.cell_count, value)
     }
@@ -70,14 +69,19 @@ impl Page {
     }
 }
 
+/// Represents the buffer pool _manager_. For now it only interacts with the memory, but in future
+/// milestones, it'll interact with the disk as well. One instance of the buffer pool manager is
+/// shared by _all_ tables using `Arc<Mutex<>>`.
 #[derive(Clone)]
 #[pyclass]
 pub struct BufferPool {
+    /// Contains physical pages for all tables. 
     pages: Vec<Page>
 }
 
 #[pymethods]
 impl BufferPool {
+    /// Create the buffer pool manager.
     #[new]
     pub fn new() -> Self {
         BufferPool {
@@ -86,6 +90,7 @@ impl BufferPool {
     }
 }
 
+// These methods aren't exposed to Python
 impl BufferPool {
     /// Create a new page and add it to the vector of pages. Returns the index of this page.
     pub fn allocate_page(&mut self, ) -> PageIdentifier {
@@ -93,6 +98,7 @@ impl BufferPool {
         self.pages.len() - 1
     }
 
+    // Create several pages and add them all to the pages vector. Return all of their indices.
     pub fn allocate_pages(&mut self, count: usize) -> Vec<PageIdentifier> {
         let mut result = Vec::new();
 
@@ -116,6 +122,7 @@ impl BufferPool {
         Err() => 
     }*/
 
+    /// Write a value to the next available offset on the page at index `page`.
     pub fn write_next(&mut self, page: PageIdentifier, value: Option<i64>) -> Result<usize, ()> {
         if page >= self.pages.len() {
             // Page index out of bounds
@@ -126,6 +133,7 @@ impl BufferPool {
         self.pages[page].write_next(value)
     }
 
+    /// Read the value at index `offset` on the page at index `page`.
     pub fn read(&mut self, page: usize, offset: usize) -> Result<Option<i64>, ()> {
         if page >= self.pages.len() {
             // Page index is out of bounds

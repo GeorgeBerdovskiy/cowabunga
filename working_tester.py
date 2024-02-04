@@ -3,7 +3,7 @@ from lstore.query import Query
 
 from lstore.wrappers.table_wrapper import WrappedTable
 
-from ecs_165_database import table_module, buffer_pool_module
+from cowabunga_rs import table_module, buffer_pool_module
 from time import process_time
 from random import choice, randrange
 
@@ -11,6 +11,9 @@ bpm = buffer_pool_module.BufferPool()
 grades_table = table_module.Table("Grades", 5, 0, bpm)
 
 grades_table.insert([90210, 93, 94, 95, 96])
+
+print("[DEBUG] This still works.")
+
 # grades_table.insert([90210, 93, 94, 95, 96])
 
 '''db = Database()
