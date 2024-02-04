@@ -1,5 +1,7 @@
 // (Milestone One) Handle reads, writes, and creation of physical pages _in memory_ only.
 
+use pyo3::{pyclass, pymethods};
+
 /// Number of cells that can be stored in a page.
 const CELLS_PER_PAGE: usize = 512;
 
@@ -27,6 +29,7 @@ impl Cell {
 /// we divide the RID by 512 for the page index and calculate the remainder for the offset (the
 /// cell index).
 #[derive(Clone, Copy, Debug)]
+#[pyclass]
 pub struct Page {
     /// Fixed size array of cells.
     cells: [Cell; CELLS_PER_PAGE],
@@ -67,8 +70,20 @@ impl Page {
     }
 }
 
+#[derive(Clone)]
+#[pyclass]
 pub struct BufferPool {
     pages: Vec<Page>
+}
+
+#[pymethods]
+impl BufferPool {
+    #[new]
+    pub fn new() -> Self {
+        BufferPool {
+            pages: Vec::new()
+        }
+    }
 }
 
 impl BufferPool {

@@ -118,30 +118,39 @@ pub struct Table {
     buffer_pool_manager: Arc<Mutex<BufferPool>>
 }
 
+#[pymethods]
 impl Table {
-    pub fn new(name: String, num_columns: usize, key_column: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> Self {
+    #[new]
+    pub fn new(name: String, num_columns: usize, key_column: usize, buffer_pool_manager: &PyAny) -> Self {
+        let buffer_pool_mgr = buffer_pool_manager.extract::<PyRef<BufferPool>>().unwrap();
+        let buffer_pool_mgr = Arc::new(Mutex::new(buffer_pool_mgr.clone()));
+
         Table {
             name,
             num_columns,
             key_column,
             next_rid: 0,
-            page_ranges: vec![PageRange::new(num_columns, buffer_pool_manager.clone())],
+            page_ranges: vec![PageRange::new(num_columns, buffer_pool_mgr.clone())],
             page_directory: HashMap::new(),
             lid_to_rid: HashMap::new(),
             next_page_range: 0,
-            buffer_pool_manager
+            buffer_pool_manager: buffer_pool_mgr
         }
     }
 
     /// Add a **base record** to the table.
-    pub fn insert(&mut self, columns: Vec<Option<i64>>) -> Result<(), ()> {
+    pub fn insert(&mut self, columns: Vec<Option<i64>>) -> PyResult<()> {
         if columns.len() < self.num_columns {
-            return Err(());
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Not enough columns.",
+            ));
         }
 
         // NOTE - This will crash if the value in columns[self.key_column] is `None`
         if self.lid_to_rid.get(&columns[self.key_column].unwrap()).is_some() {
-            return Err(());
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Record with this identifier already exists.",
+            ));
         }
 
         match self.page_ranges[self.next_page_range].insert_base(&columns) {
