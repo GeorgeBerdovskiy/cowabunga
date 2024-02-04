@@ -8,6 +8,8 @@ const CELLS_PER_PAGE: usize = 512;
 #[derive(Copy, Clone, Debug)]
 struct Cell(Option<i64>);
 
+pub type PageIdentifier = usize;
+
 impl Cell {
     /// Create a new cell.
     pub fn new(value: Option<i64>) -> Self {
@@ -19,7 +21,6 @@ impl Cell {
         Cell(None)
     }
 }
-
 
 /// Represents a physical page. In our design, every physical page has 512 cells. Therefore,
 /// each has a size of **4096 bytes**. In order to calculate the physical location of a record,
@@ -44,7 +45,7 @@ impl Page {
     }
 
     /// Write a new record to a physical page. For now, assume the offset is always valid.
-    pub fn write(&mut self, offset: usize, value: Option<i64>) -> Result<(), ()> {
+    pub fn write(&mut self, offset: usize, value: Option<i64>) -> Result<usize, ()> {
         if offset >= self.cells.len() {
             return Err(());
         }
@@ -52,7 +53,11 @@ impl Page {
         self.cells[offset] = Cell::new(value);
         self.cell_count += 1;
 
-        Ok(())
+        Ok(self.cell_count - 1)
+    }
+
+    pub fn write_next(&mut self, value: Option<i64>) -> Result<usize, ()> {
+        self.write(self.cell_count, value)
     }
 
     /// Read a single cell from a physical page. For now, assume the offset is always valid.
@@ -62,20 +67,29 @@ impl Page {
     }
 }
 
-
 pub struct BufferPool {
     pages: Vec<Page>
 }
 
 impl BufferPool {
     /// Create a new page and add it to the vector of pages. Returns the index of this page.
-    fn allocate_page(&mut self, ) -> usize {
+    pub fn allocate_page(&mut self, ) -> PageIdentifier {
         self.pages.push(Page::new());
         self.pages.len() - 1
     }
 
+    pub fn allocate_pages(&mut self, count: usize) -> Vec<PageIdentifier> {
+        let mut result = Vec::new();
+
+        for _ in [0..count] {
+            result.push(self.allocate_page());
+        }
+
+        result
+    }
+
     /// Write a value to page at index `page` and offset `offset` on that page
-    fn write(&mut self, page: usize, offset: usize, value: Option<i64>) -> Result<(), ()> {
+    /*pub fn write(&mut self, page: PageIdentifier, offset: usize, value: Option<i64>) -> Result<(), ()> {
         if page >= self.pages.len() {
             // Page index is out of bounds
             return Err(())
@@ -83,9 +97,21 @@ impl BufferPool {
 
         // Page index is in bounds - proceed to write
         self.pages[page].write(offset, value)
+        Ok() =>
+        Err() => 
+    }*/
+
+    pub fn write_next(&mut self, page: PageIdentifier, value: Option<i64>) -> Result<usize, ()> {
+        if page >= self.pages.len() {
+            // Page index out of bounds
+            return Err(());
+        }
+
+        // Page index is in bounds - try writing
+        self.pages[page].write_next(value)
     }
 
-    fn read(&mut self, page: usize, offset: usize) -> Result<Option<i64>, ()> {
+    pub fn read(&mut self, page: usize, offset: usize) -> Result<Option<i64>, ()> {
         if page >= self.pages.len() {
             // Page index is out of bounds
             return Err(())
