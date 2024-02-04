@@ -1,6 +1,7 @@
 use pyo3::{buffer, prelude::*};
 use core::num;
 use std::{collections::HashMap, hash::Hash, marker::PhantomData};
+use std::sync::{Arc, Mutex};
 
 const BASE_PAGES_PER_RANGE: usize = 16;
 
@@ -12,30 +13,29 @@ struct Base;
 #[derive(Clone, Copy)]
 struct Tail;
 
-#[derive(Clone)]
 struct LogicalPage<T> {
     /// Vector of **page identifiers**.
     columns: Vec<PageIdentifier>,
-    buffer_pool_manager: &mut BufferPool,
+    buffer_pool_manager: Arc<Mutex<BufferPool>>,
     phantom: PhantomData<T>
 }
 
 impl<T> LogicalPage<T> {
-    pub fn new(num_columns: usize, buffer_pool_manager: &'static mut BufferPool) -> LogicalPage<T> {
+    pub fn new(num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> LogicalPage<T> {
         LogicalPage {
-            columns: buffer_pool_manager.allocate_pages(num_columns),
-            buffer_pool_manager: buffer_pool_manager,
+            columns: buffer_pool_manager.clone().lock().unwrap().allocate_pages(num_columns),
+            buffer_pool_manager,
             phantom: PhantomData::<T>
         }
     }
 }
 
 impl<Base> LogicalPage<Base> {
-    pub fn insert(&mut self, columns: Vec<Option<i64>>) -> Result<usize, ()> {
+    pub fn insert(&mut self, columns: &Vec<Option<i64>>) -> Result<usize, ()> {
         let mut offset = 0;
 
         for pair in self.columns.iter().zip(columns.iter()) {
-            match self.buffer_pool_manager.write_next(*pair.0, *pair.1) {
+            match self.buffer_pool_manager.lock().unwrap().write_next(*pair.0, *pair.1) {
                 Ok(returned_offset) => offset = returned_offset,
                 Err(error) => return Err(error)
             }
@@ -53,21 +53,27 @@ struct PageRange {
 }
 
 impl PageRange {
-    pub fn new(num_columns: usize, buffer_pool_manager: &'static mut BufferPool) -> Self {
+    pub fn new(num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> Self {
+        let mut base_page_vec: Vec<LogicalPage<Base>> = Vec::new();
+
+        for _ in [0..BASE_PAGES_PER_RANGE] {
+            base_page_vec.push(LogicalPage::new(num_columns, buffer_pool_manager.clone()));
+        }
+
         PageRange {
-            base_pages: vec![LogicalPage::<Base>::new(num_columns, buffer_pool_manager); BASE_PAGES_PER_RANGE],
+            base_pages: base_page_vec,
             tail_pages: vec![LogicalPage::<Tail>::new(num_columns, buffer_pool_manager)],
             
             next_base_page: 0
         }
     }
 
-    pub fn insert_base(&mut self, columns: Vec<Option<i64>>) -> Result<(usize, usize), ()> {
+    pub fn insert_base(&mut self, columns: &Vec<Option<i64>>) -> Result<(usize, usize), ()> {
         if self.next_base_page == BASE_PAGES_PER_RANGE {
             return Err(());
         }
 
-        match self.base_pages[self.next_base_page].insert(columns) {
+        match self.base_pages[self.next_base_page].insert(&columns) {
             Ok(offset) => {
                 return Ok((self.next_base_page, offset))
             },
@@ -80,15 +86,8 @@ impl PageRange {
     }
 }
 
-#[derive(Eq, Hash, PartialEq)]
-struct RID {
-    raw: usize
-}
-
-#[derive(Eq, Hash, PartialEq)]
-struct LID {
-    raw: i64
-}
+type RID = usize;
+type LID = i64;
 
 struct BaseAddress {
     range: usize,
@@ -106,6 +105,7 @@ pub struct Table {
 
     /// Index of the primary key column.
     key_column: usize,
+    next_rid: usize,
 
     page_ranges: Vec<PageRange>,
     page_directory: HashMap<RID, BaseAddress>,
@@ -115,16 +115,17 @@ pub struct Table {
     next_page_range: usize,
 
     /// Reference to the buffer pool manager shared by all tables.
-    buffer_pool_manager: &'static BufferPool
+    buffer_pool_manager: Arc<Mutex<BufferPool>>
 }
 
 impl Table {
-    pub fn new(name: String, num_columns: usize, key_column: usize, buffer_pool_manager: &'static mut BufferPool) -> Self {
+    pub fn new(name: String, num_columns: usize, key_column: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> Self {
         Table {
             name,
             num_columns,
             key_column,
-            page_ranges: vec![PageRange::new(num_columns, buffer_pool_manager)],
+            next_rid: 0,
+            page_ranges: vec![PageRange::new(num_columns, buffer_pool_manager.clone())],
             page_directory: HashMap::new(),
             lid_to_rid: HashMap::new(),
             next_page_range: 0,
@@ -133,26 +134,33 @@ impl Table {
     }
 
     /// Add a **base record** to the table.
-    pub fn insert(&mut self, columns: Vec<Option<i64>>) -> Result<BaseAddress, ()> {
+    pub fn insert(&mut self, columns: Vec<Option<i64>>) -> Result<(), ()> {
         if columns.len() < self.num_columns {
             return Err(());
         }
 
         // NOTE - This will crash if the value in columns[self.key_column] is `None`
-        if self.lid_to_rid.get(&LID { raw: columns[self.key_column].unwrap() }).is_some() {
+        if self.lid_to_rid.get(&columns[self.key_column].unwrap()).is_some() {
             return Err(());
         }
 
-        match self.page_ranges[self.next_page_range].insert_base(columns) {
-            Ok((page, offset)) => Ok(BaseAddress {
-                range: self.next_page_range,
-                page,
-                offset
-            }),
+        match self.page_ranges[self.next_page_range].insert_base(&columns) {
+            Ok((page, offset)) => {
+                self.lid_to_rid.insert(columns[self.key_column].unwrap(), self.next_rid);
+
+                self.page_directory.insert(self.next_rid, BaseAddress {
+                    range: self.next_page_range,
+                    page,
+                    offset
+                });
+
+                self.next_rid += 1;
+                Ok(())
+            },
 
             Err(_) => {
                 // This page range is full - add new range
-                self.page_ranges.push(PageRange::new(self.num_columns, &mut self.buffer_pool_manager));
+                self.page_ranges.push(PageRange::new(self.num_columns, self.buffer_pool_manager.clone()));
                 self.next_page_range += 1;
 
                 return self.insert(columns);
