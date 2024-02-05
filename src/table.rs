@@ -69,7 +69,13 @@ struct PageRange {
 
     /// Index of the next base page to which we can write. If it ever becomes `BASE_PAGES_PER_RANGE`,
     /// this page range cannot accept any more base records.
-    next_base_page: usize
+    next_base_page: usize,
+
+    /// Number of columns in the table.
+    num_columns: usize,
+
+    /// Shared buffer pool manager
+    buffer_pool_manager: Arc<Mutex<BufferPool>>
 }
 
 impl PageRange {
@@ -85,8 +91,10 @@ impl PageRange {
 
         PageRange {
             base_pages: base_page_vec,
-            tail_pages: vec![LogicalPage::<Tail>::new(num_columns, buffer_pool_manager)],
-            next_base_page: 0
+            tail_pages: vec![LogicalPage::<Tail>::new(num_columns, buffer_pool_manager.clone())],
+            next_base_page: 0,
+            num_columns,
+            buffer_pool_manager: buffer_pool_manager.clone()
         }
     }
 
@@ -110,6 +118,7 @@ impl PageRange {
                 // Failed to insert record because there is no more space in the physical pages
                 // Increment the base page index and try to insert again
                 self.next_base_page += 1;
+                self.base_pages.push(LogicalPage::new(self.num_columns, self.buffer_pool_manager.clone()));
 
                 // Note that although this call is recursive, it will have a depth of at most one
                 return self.insert_base(columns);

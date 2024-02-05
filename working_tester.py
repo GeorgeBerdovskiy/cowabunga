@@ -12,7 +12,12 @@ grades_table = table_module.Table("Grades", 5, 0, bpm)
 
 grades_table.insert([90210, 93, 94, 95, 96])
 
-print("[DEBUG] This still works.")
+insert_time_0 = process_time()
+for i in range(0, 10000):
+    grades_table.insert([906659671 + i, 93, 94, 95, 96])
+insert_time_1 = process_time()
+
+print("Inserting 10k records took:  \t\t\t", insert_time_1 - insert_time_0)
 
 # grades_table.insert([90210, 93, 94, 95, 96])
 
