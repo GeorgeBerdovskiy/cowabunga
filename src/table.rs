@@ -45,7 +45,7 @@ impl LogicalPage<Base> {
     pub fn insert(&mut self, columns: &Vec<Option<i64>>) -> Result<usize, ()> {
         let mut offset = 0;
 
-        for pair in self.columns.iter().skip(NUM_METADATA_COLS).zip(columns.iter().skip(NUM_METADATA_COLS)) {
+        for pair in self.columns.iter().take(self.columns.len() - 2).zip(columns.iter()) {
             match self.buffer_pool_manager.lock().unwrap().write_next(*pair.0, *pair.1) {
                 Ok(returned_offset) => offset = returned_offset,
                 Err(error) => return Err(error)
@@ -235,15 +235,13 @@ impl Table {
 
         Table {
             name,
-            num_columns,
-
-            // TODO - Ensure that something similar is done for projected columns for the INSERT query
-            key_column: key_column + NUM_METADATA_COLS,
+            num_columns: num_columns + NUM_METADATA_COLS,
+            key_column: key_column,
             next_rid: 0,
 
-            // The first `NUM_METADATA_COLS` columns are the _indirection_ and _schema encoding_ columns,
+            // The last `NUM_METADATA_COLS` columns are the _indirection_ and _schema encoding_ columns,
             // repsectively. The rest are defined by the user.
-            page_ranges: vec![PageRange::new(NUM_METADATA_COLS + num_columns, buffer_pool_manager.clone())],
+            page_ranges: vec![PageRange::new(num_columns + NUM_METADATA_COLS, buffer_pool_manager.clone())],
             page_directory: HashMap::new(),
             lid_to_rid: HashMap::new(),
             next_page_range: 0,
