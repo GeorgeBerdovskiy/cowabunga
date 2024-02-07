@@ -3,6 +3,7 @@ use pyo3::{prelude::*, wrap_pymodule};
 mod constants;
 mod bufferpool;
 mod table;
+mod helpers;
 
 #[pymodule]
 fn buffer_pool_module(_py: Python, m: &PyModule) -> PyResult<()> {

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::constants::*;
 use crate::bufferpool::*;
+use crate::helpers::*;
 
 /// Empty type representing **base** pages. Used as a generic type argument for the `LogicalPage` struct
 /// to distinguish between base and tail pages without overhead.
@@ -84,7 +85,7 @@ impl LogicalPage<Base> {
 
 impl LogicalPage<Tail> {
     /// Insert a new **tail** record given a vector of columns.
-    pub fn insert(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>) -> Result<usize, ()> {
+    pub fn insert(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>, schema_encoding: i64) -> Result<usize, ()> {
         let mut offset = 0;
 
         for pair in columns.iter().zip(self.columns.iter().take(self.columns.len() - 2)) {
@@ -102,6 +103,8 @@ impl LogicalPage<Tail> {
         let res = self.buffer_pool_manager.lock().unwrap().write_next(self.columns[self.columns.len() - 2], indirection);
 
         println!("[DEBUG] Offset NOW is {:?}", res);
+
+        let res = self.buffer_pool_manager.lock().unwrap().write_next(self.columns[self.columns.len() - 1], Some(schema_encoding));
 
         res
     }
@@ -161,10 +164,10 @@ impl PageRange {
         self.base_pages[base_addr.page].update_indirection(base_addr.offset, new_rid)
     }
 
-    pub fn insert_tail(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>) -> (usize, usize) {
+    pub fn insert_tail(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>, schema_encoding: i64) -> (usize, usize) {
         let next_tail_page = self.tail_pages.len() - 1;
 
-        match self.tail_pages[next_tail_page].insert(&columns, indirection) {
+        match self.tail_pages[next_tail_page].insert(&columns, indirection, schema_encoding) {
             Ok(offset) => {
                 // Record was inserted successfully
                 return (next_tail_page, offset);
@@ -176,7 +179,7 @@ impl PageRange {
                 self.tail_pages.push(LogicalPage::new(self.num_columns, self.buffer_pool_manager.clone()));
 
                 // Note that although this call is recursive, it will have a depth of at most one
-                return self.insert_tail(columns, indirection);
+                return self.insert_tail(columns, indirection, schema_encoding);
             }
         }
     }
@@ -328,11 +331,14 @@ impl Table {
 
                 println!("[DEBUG] Indirection is {:?}", indirection);
 
+                // Generate the schema encoding value
+                let schema_encoding = bitmask(&columns, 1);
+
                 // We need to store this indirection when adding the tail page
                 let (page, offset) = if indirection.is_some() {
-                    self.page_ranges[base_addr.range].insert_tail(&columns, indirection)
+                    self.page_ranges[base_addr.range].insert_tail(&columns, indirection, schema_encoding)
                 } else {
-                    self.page_ranges[base_addr.range].insert_tail(&columns, Some(base_rid as i64))
+                    self.page_ranges[base_addr.range].insert_tail(&columns, Some(base_rid as i64), schema_encoding)
                 };
 
                 // Add the new RID to physical address mapping
