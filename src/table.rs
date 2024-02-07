@@ -362,26 +362,106 @@ impl Table {
         }
     }
 
+    /// Select the most recent version of a record given its primary key.
     pub fn select(&mut self, primary_key: i64) -> PyResult<Vec<Option<i64>>> {
+        // First, determine the record's RID
         match self.lid_to_rid.get(&primary_key) {
-            Some(rid) => {
-                let base_addr = self.page_directory[&rid];
+            Some(base_rid) => {
+                // We now have the base record RID! Next, we need to see its indirection column
+                let base_addr = self.page_directory[&base_rid];
                 
                 match self.page_ranges[base_addr.range].read_base_record(base_addr.page, base_addr.offset) {
                     Ok(columns) => {
-                        println!("[DEBUG] Columns are {:?}", columns);
-
-                        // Check if we should look for a tail record
+                        // Check if we should look for a tail record by checking the indirection column
                         match columns[columns.len() - 2] {
                             Some(tail_rid) => {
-                                // Grab the tail record
-                                // TODO - Make sure this doesn't crash on 32-bit systems, where usize may not be 64 bits
+                                // The base record's indirection column is pointing to a tail record - let's grab it
+                                // First, determine its address using the page directory
                                 let tail_addr = self.page_directory[&(tail_rid as usize)];
 
+                                // Next, read the tail record at this address
                                 match self.page_ranges[base_addr.range].read_tail_record(tail_addr.page, tail_addr.offset) {
-                                    Ok(columns) => {
-                                        println!("[DEBUG] Tail cols are {:?}", columns);
-                                        Ok(columns)
+                                    Ok(tail_columns) => {
+                                        println!("[DEBUG] Have last tail record - {:?}", tail_columns);
+
+                                        // We now have the most recent tail record, but we may not have all of the columns
+                                        // since we are following a non-cumulative update scheme. Thus, we need to spin back
+                                        // the tail records using the indirection column until we have everything we want.
+
+                                        // This variable will store our final result
+                                        let mut result = tail_columns.clone();
+
+                                        // What's the value of the schema encoding column?
+                                        match tail_columns[tail_columns.len() - 1] {
+                                            Some(schema_encoding_value) => {
+                                                if schema_encoding_value == 0 {
+                                                    // There are no more updates - return the columns as they are
+                                                    return Ok(result);
+                                                }
+
+                                                // We need to spin back to find updates
+                                                let mut previous_indirection = tail_columns[tail_columns.len() - 2];
+                                                let mut previous_schema_encoding = tail_columns[tail_columns.len() - 1];
+
+                                                // While we still find something in the schema encoding, keep spinning backwwards
+                                                while previous_schema_encoding.is_some() || previous_schema_encoding != Some(0) {
+                                                    if previous_indirection.is_none() {
+                                                        println!("[DEBUG] Something went wrong... schema encoding suggests previous records exist but none were found.");
+                                                        return Ok(result);
+                                                    } else {
+                                                        println!("[DEBUG] Still have prev. indirection.");
+                                                    }
+
+                                                    // Find the address of the previous record
+                                                    let previous_addr = self.page_directory[&(previous_indirection.unwrap() as usize)];
+
+                                                    // Try getting the previous tail page
+                                                    match self.page_ranges[previous_addr.range].read_tail_record(previous_addr.page, previous_addr.offset) {
+                                                        Ok(previous_columns) => {
+                                                            println!("[DEBUG] Successfully got prev. tail page - it's {:?}", previous_columns);
+                                                            // We found the previous tail record and now have its columns!
+                                                            let this_schema_encoding = if previous_columns[previous_columns.len() - 1].is_some() {
+                                                                previous_columns[previous_columns.len() - 1].unwrap()
+                                                            } else {
+                                                                0
+                                                            };
+
+                                                            let mask = previous_schema_encoding.unwrap() ^ this_schema_encoding;
+                                                            copy_by_mask(&previous_columns, &mut result, mask);
+
+                                                            // Now update the previous indirection and schema encoding
+                                                            previous_indirection = previous_columns[previous_columns.len() - 2];
+                                                            previous_schema_encoding = previous_columns[previous_columns.len() - 1];
+                                                        },
+
+                                                        Err(_) => {
+                                                            println!("[DEBUG] Couldn't get tail page, trying to get base record...");
+                                                            // The previous record is most likely a base record - try again using the `read_base_record` function
+                                                            match self.page_ranges[previous_addr.range].read_base_record(previous_addr.page, previous_addr.offset) {
+                                                                Ok(previous_columns) => {
+                                                                    
+                                                                    // We found the base record and now have its columns!
+                                                                    println!("[DEBUG] Have base record but returning only tail results.");
+                                                                    break;
+                                                                },
+
+                                                                Err(_) => {
+                                                                    // Something else must have gone horribly wrong - abort
+                                                                    panic!("[ERROR] Failed to collect updates.")
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                return Ok(result);
+                                            },
+
+                                            None => {
+                                                // There are no more updates - return the columns as they are
+                                                return Ok(result);
+                                            }
+                                        }
                                     },
                                     Err(_) => panic!("[ERROR] Failed to read most recent tail record.")
                                 }
