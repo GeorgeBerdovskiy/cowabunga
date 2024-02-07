@@ -32,10 +32,23 @@ impl<T> LogicalPage<T> {
     /// Create a new logical page with `num_columns` columns and a shared buffer pool manager.
     pub fn new(num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> LogicalPage<T> {
         LogicalPage {
-            columns: buffer_pool_manager.clone().lock().unwrap().allocate_pages(num_columns + NUM_METADATA_COLS),
+            columns: buffer_pool_manager.clone().lock().unwrap().allocate_pages(num_columns),
             buffer_pool_manager,
             phantom: PhantomData::<T>
         }
+    }
+
+    pub fn read(&self, offset: usize) -> Result<Vec<Option<i64>> ,()>{
+        let mut result = Vec::new();
+
+        for column in &self.columns {
+            match self.buffer_pool_manager.lock().unwrap().read(*column, offset) {
+                Ok(value) => result.push(value),
+                Err(_) => return Err(())
+            }
+        }
+
+        Ok(result)
     }
 }
 
@@ -125,6 +138,10 @@ impl PageRange {
             num_columns,
             buffer_pool_manager: buffer_pool_manager.clone()
         }
+    }
+
+    pub fn read_base_record(&mut self, page: usize, offset: usize) -> Result<Vec<Option<i64>>, ()> {
+        self.base_pages[page].read(offset)
     }
 
     pub fn update_base_indirection(&mut self, base_addr: BaseAddress, new_rid: RID) -> Result<(), ()> {
@@ -307,6 +324,23 @@ impl Table {
         self.next_rid += 1;
 
         Ok(())
+    }
+
+    pub fn select(&mut self, primary_key: i64) -> PyResult<Vec<Option<i64>>> {
+        match self.lid_to_rid.get(&primary_key) {
+            Some(rid) => {
+                let base_addr = self.page_directory[&rid];
+                
+                match self.page_ranges[base_addr.range].read_base_record(base_addr.page, base_addr.offset) {
+                    Ok(columns) => Ok(columns),
+                    Err(_) => panic!("[DEBUG] Failed to read base record.")
+                }
+            },
+
+            None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Record with identifier {} doesn't exist.", primary_key),
+            ))
+        }
     }
 
     /// Create a new **base record**.

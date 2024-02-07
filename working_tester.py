@@ -19,7 +19,13 @@ insert_time_1 = process_time()
 
 print("Inserting 10k records took:  \t\t\t", insert_time_1 - insert_time_0)
 
+res = grades_table.select(906659671)
+print(res)
+
 grades_table.update([906659671, None, 99, 100, None])
+
+res = grades_table.select(906659671)
+print(res)
 
 # grades_table.insert([90210, 93, 94, 95, 96])
 
