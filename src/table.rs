@@ -84,17 +84,26 @@ impl LogicalPage<Base> {
 
 impl LogicalPage<Tail> {
     /// Insert a new **tail** record given a vector of columns.
-    pub fn insert(&mut self, columns: &Vec<Option<i64>>) -> Result<usize, ()> {
+    pub fn insert(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>) -> Result<usize, ()> {
         let mut offset = 0;
 
-        for pair in self.columns.iter().zip(columns.iter()) {
-            match self.buffer_pool_manager.lock().unwrap().write_next(*pair.0, *pair.1) {
+        for pair in columns.iter().zip(self.columns.iter().take(self.columns.len() - 2)) {
+            println!("[DEBUG] Writing {:?} to another column...", *pair.0);
+            match self.buffer_pool_manager.lock().unwrap().write_next(*pair.1, *pair.0) {
                 Ok(returned_offset) => offset = returned_offset,
                 Err(error) => return Err(error)
             }
         }
 
-        Ok(offset)
+        println!("[DEBUG] Offset thus far is {}", offset);
+
+        // Write the indirection value
+        println!("[DEBUG] Preparing to write indrection of {:?}", indirection);
+        let res = self.buffer_pool_manager.lock().unwrap().write_next(self.columns[self.columns.len() - 2], indirection);
+
+        println!("[DEBUG] Offset NOW is {:?}", res);
+
+        res
     }
 }
 
@@ -144,14 +153,18 @@ impl PageRange {
         self.base_pages[page].read(offset)
     }
 
+    pub fn read_tail_record(&mut self, page: usize, offset: usize) -> Result<Vec<Option<i64>>, ()> {
+        self.tail_pages[page].read(offset)
+    }
+
     pub fn update_base_indirection(&mut self, base_addr: BaseAddress, new_rid: RID) -> Result<(), ()> {
         self.base_pages[base_addr.page].update_indirection(base_addr.offset, new_rid)
     }
 
-    pub fn insert_tail(&mut self, columns: &Vec<Option<i64>>) -> (usize, usize) {
+    pub fn insert_tail(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>) -> (usize, usize) {
         let next_tail_page = self.tail_pages.len() - 1;
 
-        match self.tail_pages[next_tail_page].insert(&columns) {
+        match self.tail_pages[next_tail_page].insert(&columns, indirection) {
             Ok(offset) => {
                 // Record was inserted successfully
                 return (next_tail_page, offset);
@@ -163,7 +176,7 @@ impl PageRange {
                 self.tail_pages.push(LogicalPage::new(self.num_columns, self.buffer_pool_manager.clone()));
 
                 // Note that although this call is recursive, it will have a depth of at most one
-                return self.insert_tail(columns);
+                return self.insert_tail(columns, indirection);
             }
         }
     }
@@ -308,22 +321,39 @@ impl Table {
         let base_rid = self.lid_to_rid[&key_value];
         let base_addr = self.page_directory[&base_rid];
 
-        let (page, offset) = self.page_ranges[base_addr.range].insert_tail(&columns);
-        // Add the new RID to physical address mapping
-        // NOTE - It's called "BaseAddress" but I (George) believe it can be used
-        // for _any_ record - not just base records
-        self.page_directory.insert(self.next_rid, BaseAddress::new(base_addr.range, page, offset));
+        // Grab the base page because we need to check the indirection column
+        match self.page_ranges[base_addr.range].read_base_record(base_addr.page, base_addr.offset) {
+            Ok(base_columns) => {
+                let indirection = base_columns[base_columns.len() - 2];
 
-        // Update the base record indirection column
-        match self.page_ranges[base_addr.range].update_base_indirection(base_addr, self.next_rid) {
-            Ok(_) => {},
-            Err(_) => panic!("[ERROR] Failed to update base record indirection column.")
+                println!("[DEBUG] Indirection is {:?}", indirection);
+
+                // We need to store this indirection when adding the tail page
+                let (page, offset) = if indirection.is_some() {
+                    self.page_ranges[base_addr.range].insert_tail(&columns, indirection)
+                } else {
+                    self.page_ranges[base_addr.range].insert_tail(&columns, Some(base_rid as i64))
+                };
+
+                // Add the new RID to physical address mapping
+                // NOTE - It's called "BaseAddress" but I (George) believe it can be used
+                // for _any_ record - not just base records
+                self.page_directory.insert(self.next_rid, BaseAddress::new(base_addr.range, page, offset));
+        
+                // Update the base record indirection column
+                match self.page_ranges[base_addr.range].update_base_indirection(base_addr, self.next_rid) {
+                    Ok(_) => {},
+                    Err(_) => panic!("[ERROR] Failed to update base record indirection column.")
+                }
+        
+                // Increment the RID for the next record
+                self.next_rid += 1;
+        
+                Ok(())
+            },
+
+            Err(_) => panic!("[ERROR] Failed to grab base record.")
         }
-
-        // Increment the RID for the next record
-        self.next_rid += 1;
-
-        Ok(())
     }
 
     pub fn select(&mut self, primary_key: i64) -> PyResult<Vec<Option<i64>>> {
@@ -332,7 +362,29 @@ impl Table {
                 let base_addr = self.page_directory[&rid];
                 
                 match self.page_ranges[base_addr.range].read_base_record(base_addr.page, base_addr.offset) {
-                    Ok(columns) => Ok(columns),
+                    Ok(columns) => {
+                        println!("[DEBUG] Columns are {:?}", columns);
+
+                        // Check if we should look for a tail record
+                        match columns[columns.len() - 2] {
+                            Some(tail_rid) => {
+                                // Grab the tail record
+                                // TODO - Make sure this doesn't crash on 32-bit systems, where usize may not be 64 bits
+                                let tail_addr = self.page_directory[&(tail_rid as usize)];
+
+                                match self.page_ranges[base_addr.range].read_tail_record(tail_addr.page, tail_addr.offset) {
+                                    Ok(columns) => {
+                                        println!("[DEBUG] Tail cols are {:?}", columns);
+                                        Ok(columns)
+                                    },
+                                    Err(_) => panic!("[ERROR] Failed to read most recent tail record.")
+                                }
+                            },
+
+                            None => Ok(columns) // No updates - return the base record as-is
+                        }
+                    },
+
                     Err(_) => panic!("[DEBUG] Failed to read base record.")
                 }
             },
