@@ -39,9 +39,25 @@ impl<T> LogicalPage<T> {
     }
 }
 
-impl<Base> LogicalPage<Base> {
+impl LogicalPage<Base> {
     /// Insert a new **base** record given a vector of columns. Returns the offset of this record
     /// on a physical page if successful or `Err(...)` if the physical page has no more space.
+    pub fn insert(&mut self, columns: &Vec<Option<i64>>) -> Result<usize, ()> {
+        let mut offset = 0;
+
+        for pair in self.columns.iter().zip(columns.iter()) {
+            match self.buffer_pool_manager.lock().unwrap().write_next(*pair.0, *pair.1) {
+                Ok(returned_offset) => offset = returned_offset,
+                Err(error) => return Err(error)
+            }
+        }
+
+        Ok(offset)
+    }
+}
+
+impl LogicalPage<Tail> {
+    /// Insert a new **tail** record given a vector of columns.
     pub fn insert(&mut self, columns: &Vec<Option<i64>>) -> Result<usize, ()> {
         let mut offset = 0;
 
@@ -98,6 +114,26 @@ impl PageRange {
         }
     }
 
+    pub fn insert_tail(&mut self, columns: &Vec<Option<i64>>) -> (usize, usize) {
+        let next_tail_page = self.tail_pages.len() - 1;
+
+        match self.tail_pages[next_tail_page].insert(&columns) {
+            Ok(offset) => {
+                // Record was inserted successfully
+                return (next_tail_page, offset);
+            },
+
+            Err(_) => {
+                // Failed to insert record because there is no more space in the last tail page
+                // Add a new tail page and try to insert again
+                self.tail_pages.push(LogicalPage::new(self.num_columns, self.buffer_pool_manager.clone()));
+
+                // Note that although this call is recursive, it will have a depth of at most one
+                return self.insert_tail(columns);
+            }
+        }
+    }
+
     /// Insert a base record into this page range. Returns (page index, offset) if successful
     /// and `Err(...)` otherwise.
     pub fn insert_base(&mut self, columns: &Vec<Option<i64>>) -> Result<(usize, usize), ()> {
@@ -138,6 +174,7 @@ type LID = i64;
 
 // NOTE - We might want to rename this to `Address` since it should theoretically
 // work for base _and_ tail pages 
+#[derive(Clone, Copy)]
 struct BaseAddress {
     /// Page range index.
     range: usize,
@@ -209,6 +246,43 @@ impl Table {
         }
     }
 
+    /// Update an existing record (in other words, insert a **tail record**).
+    pub fn update(&mut self, columns: Vec<Option<i64>>) -> PyResult<()> {
+        if columns.len() < self.num_columns {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Table has {} columns, but only {} were provided.", self.num_columns, columns.len()),
+            ));
+        }
+
+        if columns[self.key_column].is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Key cannot be 'None'"),
+            ));
+        }
+
+        let key_value = columns[self.key_column].unwrap();
+
+        if self.lid_to_rid.get(&key_value).is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Record with identifier {} doesn't exist.", key_value),
+            ));
+        }
+
+        let base_rid = self.lid_to_rid[&key_value];
+        let base_addr = self.page_directory[&base_rid];
+
+        let (page, offset) = self.page_ranges[base_addr.range].insert_tail(&columns);
+        // Add the new RID to physical address mapping
+        // NOTE - It's called "BaseAddress" but I (George) believe it can be used
+        // for _any_ record - not just base records
+        self.page_directory.insert(self.next_rid, BaseAddress::new(base_addr.range, page, offset));
+
+        // Increment the RID for the next record
+        self.next_rid += 1;
+
+        Ok(())
+    }
+
     /// Create a new **base record**.
     pub fn insert(&mut self, columns: Vec<i64>) -> PyResult<()> {
         // Some functions take a vector of optionals rather than integers because updates use `None`
@@ -222,7 +296,6 @@ impl Table {
             ));
         }
 
-        // NOTE - This will crash if the value in columns[self.key_column] is `None`
         if self.lid_to_rid.get(&columns[self.key_column]).is_some() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 format!("Record with identifier {} already exists.", columns[self.key_column]),
