@@ -102,7 +102,7 @@ impl BufferPool {
     pub fn allocate_pages(&mut self, count: usize) -> Vec<PageIdentifier> {
         let mut result = Vec::new();
 
-        for _ in [0..count] {
+        for i in 0..count {
             result.push(self.allocate_page());
         }
 
@@ -110,17 +110,18 @@ impl BufferPool {
     }
 
     /// Write a value to page at index `page` and offset `offset` on that page
-    /*pub fn write(&mut self, page: PageIdentifier, offset: usize, value: Option<i64>) -> Result<(), ()> {
+    pub fn write(&mut self, page: PageIdentifier, offset: usize, value: Option<i64>) -> Result<(), ()> {
         if page >= self.pages.len() {
             // Page index is out of bounds
             return Err(())
         }
 
         // Page index is in bounds - proceed to write
-        self.pages[page].write(offset, value)
-        Ok() =>
-        Err() => 
-    }*/
+        match self.pages[page].write(offset, value) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(())
+        }
+    }
 
     /// Write a value to the next available offset on the page at index `page`.
     pub fn write_next(&mut self, page: PageIdentifier, value: Option<i64>) -> Result<usize, ()> {

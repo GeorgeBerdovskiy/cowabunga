@@ -32,7 +32,7 @@ impl<T> LogicalPage<T> {
     /// Create a new logical page with `num_columns` columns and a shared buffer pool manager.
     pub fn new(num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> LogicalPage<T> {
         LogicalPage {
-            columns: buffer_pool_manager.clone().lock().unwrap().allocate_pages(num_columns),
+            columns: buffer_pool_manager.clone().lock().unwrap().allocate_pages(num_columns + NUM_METADATA_COLS),
             buffer_pool_manager,
             phantom: PhantomData::<T>
         }
@@ -45,14 +45,27 @@ impl LogicalPage<Base> {
     pub fn insert(&mut self, columns: &Vec<Option<i64>>) -> Result<usize, ()> {
         let mut offset = 0;
 
-        for pair in self.columns.iter().take(self.columns.len() - 2).zip(columns.iter()) {
+        // This adds the user's columns, but _not_ the metadata columns
+        for pair in self.columns.iter().zip(columns.iter()) {
             match self.buffer_pool_manager.lock().unwrap().write_next(*pair.0, *pair.1) {
                 Ok(returned_offset) => offset = returned_offset,
                 Err(error) => return Err(error)
             }
         }
 
+        // Now, we need to add the metadata columns. For now, we'll just use `None` for simplicity
+        for column in self.columns.iter().skip(columns.len()) {
+            self.buffer_pool_manager.lock().unwrap().write_next(*column, None).expect("[ERROR] Failed to write metadata columns.");
+        }
+
         Ok(offset)
+    }
+
+    pub fn update_indirection(&mut self, offset: usize, new_rid: RID) -> Result<(), ()> {
+        // The page identifier at index self.columns.len() - 2 is the indirection, while the
+        // page identifier at index self.columns.len() - 1 is the schema encoding column
+        let indirection_col = self.columns[self.columns.len() - 2];
+        self.buffer_pool_manager.lock().unwrap().write(indirection_col, offset, Some(new_rid as i64))
     }
 }
 
@@ -112,6 +125,10 @@ impl PageRange {
             num_columns,
             buffer_pool_manager: buffer_pool_manager.clone()
         }
+    }
+
+    pub fn update_base_indirection(&mut self, base_addr: BaseAddress, new_rid: RID) -> Result<(), ()> {
+        self.base_pages[base_addr.page].update_indirection(base_addr.offset, new_rid)
     }
 
     pub fn insert_tail(&mut self, columns: &Vec<Option<i64>>) -> (usize, usize) {
@@ -235,7 +252,7 @@ impl Table {
 
         Table {
             name,
-            num_columns: num_columns + NUM_METADATA_COLS,
+            num_columns: num_columns,
             key_column: key_column,
             next_rid: 0,
 
@@ -279,6 +296,12 @@ impl Table {
         // NOTE - It's called "BaseAddress" but I (George) believe it can be used
         // for _any_ record - not just base records
         self.page_directory.insert(self.next_rid, BaseAddress::new(base_addr.range, page, offset));
+
+        // Update the base record indirection column
+        match self.page_ranges[base_addr.range].update_base_indirection(base_addr, self.next_rid) {
+            Ok(_) => {},
+            Err(_) => panic!("[ERROR] Failed to update base record indirection column.")
+        }
 
         // Increment the RID for the next record
         self.next_rid += 1;
