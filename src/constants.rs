@@ -5,4 +5,4 @@ pub const BASE_PAGES_PER_RANGE: usize = 16;
 pub const CELLS_PER_PAGE: usize = 512;
 
 /// Number of metadata columns.
-pub const NUM_METADATA_COLS: usize = 2;
+pub const NUM_METADATA_COLS: usize = 1;

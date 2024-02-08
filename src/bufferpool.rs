@@ -24,6 +24,13 @@ impl Cell {
     pub fn empty() -> Self {
         Cell(None)
     }
+
+	pub fn print(&self) {
+		match self.0 {
+			Some(value) => println!("  {}", value),
+			None => println!("  -")
+		}
+	}
 }
 
 /// Represents a physical page. In our design, every physical page has 512 cells. Therefore,
@@ -45,6 +52,14 @@ impl Page {
             cell_count: 0,
         }
     }
+
+	pub fn print(&self) {
+		println!("[");
+		for cell in self.cells {
+			cell.print()
+		}
+		println!("]");
+	}
 
     /// Write a value to this page at the given offset.
     pub fn write(&mut self, offset: Offset, value: Option<i64>) -> Result<Offset, DatabaseError> {
@@ -92,6 +107,16 @@ impl BufferPool {
             pages: Vec::new()
         }
     }
+
+	pub fn print_all(&self) {
+		println!("[DEBUG] About to print all {} pages...", self.pages.len());
+		
+		for page in &self.pages {
+			page.print();
+		}
+
+		println!("[DEBUG] Done printing all pages.");
+	}
 }
 
 // These methods aren't exposed to Python
