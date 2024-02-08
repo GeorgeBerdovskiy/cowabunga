@@ -1,17 +1,18 @@
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
 use std::{collections::HashMap, marker::PhantomData};
 use std::sync::{Arc, Mutex};
 
 use crate::constants::*;
 use crate::bufferpool::*;
+use crate::errors::DatabaseError;
+use crate::helpers::*;
 
-/// Empty type representing **base** pages. Used as a generic type argument for the `LogicalPage` struct
-/// to distinguish between base and tail pages without overhead.
+/// Empty type representing **base** pages.
 #[derive(Clone, Copy)]
 struct Base;
 
-/// Empty type representing **tail** pages. Used as a generic type argument for the `LogicalPage` struct
-/// to distinguish between base and tail pages without overhead.
+/// Empty type representing **tail** pages.
 #[derive(Clone, Copy)]
 struct Tail;
 
@@ -23,11 +24,11 @@ struct LogicalPage<T> {
     /// Buffer pool manager shared by all tables.
     buffer_pool_manager: Arc<Mutex<BufferPool>>,
 
-    /// Phantom field for the generic type argument (required since none of the other fields
-    /// actually use `T`).
+    /// Phantom field for the generic type argument (required since none of the other fields actually use `T`).
     phantom: PhantomData<T>
 }
 
+/// Methods for all logical pages.
 impl<T> LogicalPage<T> {
     /// Create a new logical page with `num_columns` columns and a shared buffer pool manager.
     pub fn new(num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> LogicalPage<T> {
@@ -37,20 +38,53 @@ impl<T> LogicalPage<T> {
             phantom: PhantomData::<T>
         }
     }
+
+    /// Read from every column in this logical page given an offset.
+    pub fn read(&self, offset: Offset) -> Result<Vec<Option<i64>>, DatabaseError>{
+        self.columns.iter()
+            .map(|column| self.buffer_pool_manager.lock().unwrap().read(*column, offset))
+            .collect()
+    }
 }
 
-impl<Base> LogicalPage<Base> {
+/// Methods for logical **base** pages.
+impl LogicalPage<Base> {
     /// Insert a new **base** record given a vector of columns. Returns the offset of this record
     /// on a physical page if successful or `Err(...)` if the physical page has no more space.
-    pub fn insert(&mut self, columns: &Vec<Option<i64>>) -> Result<usize, ()> {
+    pub fn insert(&mut self, columns: &Vec<Option<i64>>) -> Result<Offset, DatabaseError> {
         let mut offset = 0;
 
-        for pair in self.columns.iter().zip(columns.iter()) {
-            match self.buffer_pool_manager.lock().unwrap().write_next(*pair.0, *pair.1) {
-                Ok(returned_offset) => offset = returned_offset,
-                Err(error) => return Err(error)
-            }
+        // This adds the user's columns, but _not_ the metadata columns
+        for (user_column, column_value) in self.columns.iter().zip(columns.iter()) {
+            offset = self.buffer_pool_manager.lock().unwrap().write_next(*user_column, *column_value)?;
         }
+
+        // Write the indirection column, which is last
+		self.buffer_pool_manager.lock().unwrap().write_next(self.columns[self.columns.len() - 1], None)?;
+
+        Ok(offset)
+    }
+
+    /// Updates the indirection column of a base record.
+    pub fn update_indirection(&mut self, offset: Offset, new_rid: RID) -> Result<(), DatabaseError> {
+        // The columns are _ | _ | ... | INDIRECTION
+        let indirection_column = self.columns[self.columns.len() - 1];
+        self.buffer_pool_manager.lock().unwrap().write(indirection_column, offset, Some(new_rid as i64))
+    }
+}
+
+/// Methods for logical **tail** pages
+impl LogicalPage<Tail> {
+    /// Insert a new **tail** record given a vector of columns.
+    pub fn insert(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>) -> Result<Offset, DatabaseError> {
+        let mut offset = 0;
+
+        // Iterate over columns and write their values, excluding the last one for special handling
+        for (&user_column, &column_value) in columns.iter().zip(self.columns.iter().take(self.columns.len() - 1)) {
+            offset = self.buffer_pool_manager.lock().unwrap().write_next(column_value, user_column)?;
+        }
+
+        self.buffer_pool_manager.lock().unwrap().write_next(self.columns[self.columns.len() - 1], indirection)?;
 
         Ok(offset)
     }
@@ -74,20 +108,16 @@ struct PageRange {
     /// Number of columns in the table.
     num_columns: usize,
 
-    /// Shared buffer pool manager
+    /// Shared buffer pool manager.
     buffer_pool_manager: Arc<Mutex<BufferPool>>
 }
 
 impl PageRange {
     /// Create a new page range given the number of columns and a shared buffer pool manager.
     pub fn new(num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> Self {
-        let mut base_page_vec: Vec<LogicalPage<Base>> = Vec::new();
-
-        // Initialize the base page vector. Unfortunately, we can't use `vec![...]` because
-        // logical pages cannot implement `Copy` - the vectors they store prevent this
-        for _ in [0..BASE_PAGES_PER_RANGE] {
-            base_page_vec.push(LogicalPage::new(num_columns, buffer_pool_manager.clone()));
-        }
+        let base_page_vec = (0..BASE_PAGES_PER_RANGE)
+            .map(|_| LogicalPage::new(num_columns, buffer_pool_manager.clone()))
+            .collect();
 
         PageRange {
             base_pages: base_page_vec,
@@ -98,22 +128,47 @@ impl PageRange {
         }
     }
 
-    /// Insert a base record into this page range. Returns (page index, offset) if successful
-    /// and `Err(...)` otherwise.
-    pub fn insert_base(&mut self, columns: &Vec<Option<i64>>) -> Result<(usize, usize), ()> {
+    /// Read an entire base record given the page index and physical offset.
+    pub fn read_base_record(&mut self, page: usize, offset: Offset) -> Result<Vec<Option<i64>>, DatabaseError> {
+        self.base_pages[page].read(offset)
+    }
+
+    /// Read an entire tail record given the page index and physical offset.
+    pub fn read_tail_record(&mut self, page: usize, offset: Offset) -> Result<Vec<Option<i64>>, DatabaseError> {
+        self.tail_pages[page].read(offset)
+    }
+
+    /// Update the indirection column of a base record given its address and the new RID.
+    pub fn update_base_indirection(&mut self, address: Address, new_rid: RID) -> Result<(), DatabaseError> {
+        self.base_pages[address.page].update_indirection(address.offset, new_rid)
+    }
+
+    /// Insert a tail record into this page range. Returns the logical page index and physical offset.
+    pub fn insert_tail(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>) -> (usize, Offset) {
+        let next_tail_page = self.tail_pages.len() - 1;
+
+        match self.tail_pages[next_tail_page].insert(&columns, indirection) {
+            Ok(offset) => (next_tail_page, offset),
+            Err(_) => {
+                // Add a new tail page and try to insert again
+                self.tail_pages.push(LogicalPage::new(self.num_columns, self.buffer_pool_manager.clone()));
+
+                // Recursively insert which will have at most one level of recursion
+                return self.insert_tail(columns, indirection);
+            }
+        }
+    }
+
+    /// Insert a base record into this page range. Returns the logical page index and physical offset if successful
+    /// and an error otherwise.
+    pub fn insert_base(&mut self, columns: &Vec<Option<i64>>) -> Result<(usize, Offset), DatabaseError> {
         if self.next_base_page >= BASE_PAGES_PER_RANGE {
-            // We ran out of base pages - returning this error will trigger the creation
-            // of a new page range
-            return Err(());
+            return Err(DatabaseError::PageRangeFilled);
         }
 
         // We still have at least one base page left to fill... try to insert record
         match self.base_pages[self.next_base_page].insert(&columns) {
-            Ok(offset) => {
-                // Record was inserted successfully
-                return Ok((self.next_base_page, offset))
-            },
-
+            Ok(offset) => Ok((self.next_base_page, offset)),
             Err(_) => {
                 // Failed to insert record because there is no more space in the physical pages
                 // Increment the base page index and try to insert again
@@ -135,10 +190,8 @@ type LID = i64;
 
 /// Represents the address of a record. We obtain this address from the page directory,
 /// which maps from RIDs to physical addresses.
-
-// NOTE - We might want to rename this to `Address` since it should theoretically
-// work for base _and_ tail pages 
-struct BaseAddress {
+#[derive(Clone, Copy)]
+struct Address {
     /// Page range index.
     range: usize,
 
@@ -146,13 +199,13 @@ struct BaseAddress {
     page: usize,
 
     /// Physical page offset.
-    offset: usize
+    offset: Offset
 }
 
-impl BaseAddress {
+impl Address {
     // Create a new base address.
     pub fn new(range: usize, page: usize, offset: usize) -> Self {
-        BaseAddress {range, page, offset }
+        Address {range, page, offset }
     }
 }
 
@@ -175,7 +228,7 @@ pub struct Table {
     page_ranges: Vec<PageRange>,
 
     /// Page directory - maps from RIDs to base record addresses.
-    page_directory: HashMap<RID, BaseAddress>,
+    page_directory: HashMap<RID, Address>,
 
     /// Maps LIDs to RIDs.
     lid_to_rid: HashMap<LID, RID>,
@@ -183,7 +236,7 @@ pub struct Table {
     /// Index of the next available page range.
     next_page_range: usize,
 
-    /// Buffer pool manager shared by all tables
+    /// Buffer pool manager shared by all tables.
     buffer_pool_manager: Arc<Mutex<BufferPool>>
 }
 
@@ -201,11 +254,13 @@ impl Table {
             num_columns,
             key_column,
             next_rid: 0,
-            page_ranges: vec![PageRange::new(num_columns, buffer_pool_manager.clone())],
+
+            // The columns are _ | _ | ... | INDIRECTION
+            page_ranges: vec![PageRange::new(num_columns + NUM_METADATA_COLS, buffer_pool_manager.clone())],
             page_directory: HashMap::new(),
             lid_to_rid: HashMap::new(),
             next_page_range: 0,
-            buffer_pool_manager: buffer_pool_manager
+            buffer_pool_manager
         }
     }
 
@@ -222,7 +277,6 @@ impl Table {
             ));
         }
 
-        // NOTE - This will crash if the value in columns[self.key_column] is `None`
         if self.lid_to_rid.get(&columns[self.key_column]).is_some() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 format!("Record with identifier {} already exists.", columns[self.key_column]),
@@ -235,7 +289,7 @@ impl Table {
                 self.lid_to_rid.insert(columns[self.key_column], self.next_rid);
 
                 // Add the new RID to physical address mapping
-                self.page_directory.insert(self.next_rid, BaseAddress::new(self.next_page_range, page, offset));
+                self.page_directory.insert(self.next_rid, Address::new(self.next_page_range, page, offset));
                 
                 // Increment the RID for the next record
                 self.next_rid += 1;
@@ -245,11 +299,140 @@ impl Table {
 
             Err(_) => {
                 // This page range is full - add new range
-                self.page_ranges.push(PageRange::new(self.num_columns, self.buffer_pool_manager.clone()));
+                self.page_ranges.push(PageRange::new(self.num_columns + NUM_METADATA_COLS, self.buffer_pool_manager.clone()));
                 self.next_page_range += 1;
 
                 return self.insert(columns);
             }
         }
+    }
+
+    /// Update an existing record (in other words, insert a **tail record**). Note that we are using the **cumulative** update scheme.
+    pub fn update(&mut self, key: i64, columns: Vec<Option<i64>>) -> PyResult<()> {
+        if columns.len() < self.num_columns {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Table has {} columns, but only {} were provided.", self.num_columns, columns.len()),
+            ));
+        }
+
+        let key_value = key;
+
+        if self.lid_to_rid.get(&key_value).is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Record with identifier {} doesn't exist.", key_value),
+            ));
+        }
+
+        let base_rid = self.lid_to_rid[&key_value];
+        let base_address = self.page_directory[&base_rid];
+
+		// Since we're using the cumulative update scheme, we need to grab the remaining values first
+		let mut cumulative_columns: Vec<Option<i64>> = vec![None; self.num_columns + NUM_METADATA_COLS];
+
+        // Grab the base page because we need to check the indirection column
+        match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset) {
+            Ok(base_columns) => {
+                let indirection = base_columns[base_columns.len() - 1];
+
+				if indirection.is_some() {
+					// We need to grab the last tail record
+					let tail_rid = indirection.unwrap();
+					let tail_address = self.page_directory[&(tail_rid as usize)];
+
+					match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset) {
+						Ok(tail_columns) => {
+							// We've got the tail columns - let's combine them with the requested updates
+							for (update, (original, target)) in columns.iter().zip(tail_columns.iter().zip(cumulative_columns.iter_mut())) {
+								if update.is_none() {
+									// This column isn't being updated, so use the original value
+									*target = *original;
+								} else {
+									// This column is being updated, so use the updated value
+									*target = *update;
+								}
+							}
+						},
+
+						Err(error) => {
+							// We couldn't access the tail record for some reason. For now, return an error. Later, default
+							// to using the base columns and generate a warning or something like that.
+							return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+								format!("Failed to retrieve tail record."),
+							));
+						}
+					}
+				} else {
+					// This is our first update, so columns that aren't updated should come from `base_columns`
+					for (update, (original, target)) in columns.iter().zip(base_columns.iter().zip(cumulative_columns.iter_mut())) {
+						if update.is_none() {
+							// This column isn't being updated, so use the original value
+							*target = *original;
+						} else {
+							// This column is being updated, so use the updated value
+							*target = *update;
+						}
+					}
+				}
+
+				// At this point, `cumulative_columns` contains all of our changes and original data that wasn't updated
+				let indirection_or_base_rid = indirection.unwrap_or(base_rid as i64);
+                let (page, offset) = self.page_ranges[base_address.range].insert_tail(&cumulative_columns, Some(indirection_or_base_rid));
+
+                // Add the new RID to physical address mapping
+                self.page_directory.insert(self.next_rid, Address::new(base_address.range, page, offset));
+        
+                // Update the base record indirection column
+                self.page_ranges[base_address.range].update_base_indirection(base_address, self.next_rid)
+                    .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to update base record indirection column."))?;
+
+                // Increment the RID for the next record
+                self.next_rid += 1;
+        
+                Ok(())
+            },
+
+            Err(_) => panic!("[ERROR] Failed to grab base record.")
+        }
+    }
+
+	pub fn print(&self) {
+		self.buffer_pool_manager.lock().unwrap().print_all();
+	}
+
+    /// Select the most recent version of a record given its primary key.
+    pub fn select(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<i8>) -> PyResult<Vec<Option<i64>>> {
+		// TODO - Right now, this assumes we always use the primary key. That's wrong - fix it later
+		let rid = self.lid_to_rid[&search_key];
+		let base_address = self.page_directory[&rid];
+
+		// First, get the base record
+		match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset) {
+			Ok(base_columns) => {
+				// Check if we have a most recent tail record
+				if base_columns[base_columns.len() - 1].is_none() {
+					// There is no record more recent than this one! Return it
+					// TODO - See if there is a more "efficient" way of doing this, because I'm pretty sure `into_iter` isn't cheap
+
+					return Ok(base_columns.into_iter().take(self.num_columns).collect());
+				}
+
+				// We DO have a most recent tail record - let's find it!
+				let tail_rid = base_columns[base_columns.len() - 1].unwrap();
+				let tail_address = self.page_directory[&(tail_rid as usize)];
+
+				match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset) {
+					Ok(tail_columns) => return Ok(tail_columns.into_iter().take(self.num_columns).collect()),
+					Err(_) => {
+						// Do nothing for now
+					}
+				}
+			},
+
+			Err(_) => {
+				// Do nothing for now
+			}
+		}
+
+		Ok(vec![])
     }
 }
