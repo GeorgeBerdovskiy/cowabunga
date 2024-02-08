@@ -4,15 +4,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::constants::*;
 use crate::bufferpool::*;
+use crate::errors::DatabaseError;
 use crate::helpers::*;
 
-/// Empty type representing **base** pages. Used as a generic type argument for the `LogicalPage` struct
-/// to distinguish between base and tail pages without overhead.
+/// Empty type representing **base** pages.
 #[derive(Clone, Copy)]
 struct Base;
 
-/// Empty type representing **tail** pages. Used as a generic type argument for the `LogicalPage` struct
-/// to distinguish between base and tail pages without overhead.
+/// Empty type representing **tail** pages.
 #[derive(Clone, Copy)]
 struct Tail;
 
@@ -24,11 +23,11 @@ struct LogicalPage<T> {
     /// Buffer pool manager shared by all tables.
     buffer_pool_manager: Arc<Mutex<BufferPool>>,
 
-    /// Phantom field for the generic type argument (required since none of the other fields
-    /// actually use `T`).
+    /// Phantom field for the generic type argument (required since none of the other fields actually use `T`).
     phantom: PhantomData<T>
 }
 
+/// Methods for all logical pages.
 impl<T> LogicalPage<T> {
     /// Create a new logical page with `num_columns` columns and a shared buffer pool manager.
     pub fn new(num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> LogicalPage<T> {
@@ -39,74 +38,64 @@ impl<T> LogicalPage<T> {
         }
     }
 
-    pub fn read(&self, offset: usize) -> Result<Vec<Option<i64>> ,()>{
-        let mut result = Vec::new();
-
-        for column in &self.columns {
-            match self.buffer_pool_manager.lock().unwrap().read(*column, offset) {
-                Ok(value) => result.push(value),
-                Err(_) => return Err(())
-            }
-        }
-
-        Ok(result)
+    /// Read from every column in this logical page given an offset.
+    pub fn read(&self, offset: Offset) -> Result<Vec<Option<i64>>, DatabaseError>{
+        self.columns.iter()
+            .map(|column| self.buffer_pool_manager.lock().unwrap().read(*column, offset))
+            .collect()
     }
 }
 
+/// Methods for logical **base** pages.
 impl LogicalPage<Base> {
     /// Insert a new **base** record given a vector of columns. Returns the offset of this record
     /// on a physical page if successful or `Err(...)` if the physical page has no more space.
-    pub fn insert(&mut self, columns: &Vec<Option<i64>>) -> Result<usize, ()> {
+    pub fn insert(&mut self, columns: &Vec<Option<i64>>) -> Result<Offset, DatabaseError> {
         let mut offset = 0;
 
         // This adds the user's columns, but _not_ the metadata columns
-        for pair in self.columns.iter().zip(columns.iter()) {
-            match self.buffer_pool_manager.lock().unwrap().write_next(*pair.0, *pair.1) {
-                Ok(returned_offset) => offset = returned_offset,
-                Err(error) => return Err(error)
-            }
+        for (user_column, column_value) in self.columns.iter().zip(columns.iter()) {
+            offset = self.buffer_pool_manager.lock().unwrap().write_next(*user_column, *column_value)?;
         }
 
-        // Now, we need to add the metadata columns. For now, we'll just use `None` for simplicity
-        for column in self.columns.iter().skip(columns.len()) {
-            self.buffer_pool_manager.lock().unwrap().write_next(*column, None).expect("[ERROR] Failed to write metadata columns.");
+        // Write metadata for the last two columns
+        // _ | _ | _ | ... | INDIRECTION | SCHEMA ENCODING
+        let metadata_columns = &self.columns[self.columns.len() - 2..];
+        let metadata_values = [None, Some(0)];
+
+        for (&column, &value) in metadata_columns.iter().zip(metadata_values.iter()) {
+            self.buffer_pool_manager.lock().unwrap().write_next(column, value)?;
         }
 
         Ok(offset)
     }
 
-    pub fn update_indirection(&mut self, offset: usize, new_rid: RID) -> Result<(), ()> {
-        // The page identifier at index self.columns.len() - 2 is the indirection, while the
-        // page identifier at index self.columns.len() - 1 is the schema encoding column
-        let indirection_col = self.columns[self.columns.len() - 2];
-        self.buffer_pool_manager.lock().unwrap().write(indirection_col, offset, Some(new_rid as i64))
+    /// Updates the indirection column of a base record.
+    pub fn update_indirection(&mut self, offset: Offset, new_rid: RID) -> Result<(), DatabaseError> {
+        // The columns are _ | _ | ... | INDIRECTION | SCHEMA ENCODING
+        let indirection_column = self.columns[self.columns.len() - 2];
+        self.buffer_pool_manager.lock().unwrap().write(indirection_column, offset, Some(new_rid as i64))
     }
 }
 
+/// Methods for logical **tail** pages
 impl LogicalPage<Tail> {
     /// Insert a new **tail** record given a vector of columns.
-    pub fn insert(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>, schema_encoding: i64) -> Result<usize, ()> {
+    pub fn insert(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>, schema_encoding: i64) -> Result<Offset, DatabaseError> {
         let mut offset = 0;
 
-        for pair in columns.iter().zip(self.columns.iter().take(self.columns.len() - 2)) {
-            println!("[DEBUG] Writing {:?} to another column...", *pair.0);
-            match self.buffer_pool_manager.lock().unwrap().write_next(*pair.1, *pair.0) {
-                Ok(returned_offset) => offset = returned_offset,
-                Err(error) => return Err(error)
-            }
+        // Iterate over columns and write their values, excluding the last two for special handling
+        for (&user_column, &column_value) in columns.iter().zip(self.columns.iter()) {
+            offset = self.buffer_pool_manager.lock().unwrap().write_next(column_value, user_column)?;
         }
 
-        println!("[DEBUG] Offset thus far is {}", offset);
+        // Sequentially write the indirection and schema encoding values to the last two columns
+        let metadata_columns = &[indirection, Some(schema_encoding)];
+        for (&value, &column) in metadata_columns.iter().zip(self.columns.iter().skip(self.columns.len() - 2)) {
+            self.buffer_pool_manager.lock().unwrap().write_next(column, value)?;
+        }
 
-        // Write the indirection value
-        println!("[DEBUG] Preparing to write indrection of {:?}", indirection);
-        let res = self.buffer_pool_manager.lock().unwrap().write_next(self.columns[self.columns.len() - 2], indirection);
-
-        println!("[DEBUG] Offset NOW is {:?}", res);
-
-        let res = self.buffer_pool_manager.lock().unwrap().write_next(self.columns[self.columns.len() - 1], Some(schema_encoding));
-
-        res
+        Ok(offset)
     }
 }
 
@@ -128,20 +117,16 @@ struct PageRange {
     /// Number of columns in the table.
     num_columns: usize,
 
-    /// Shared buffer pool manager
+    /// Shared buffer pool manager.
     buffer_pool_manager: Arc<Mutex<BufferPool>>
 }
 
 impl PageRange {
     /// Create a new page range given the number of columns and a shared buffer pool manager.
     pub fn new(num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> Self {
-        let mut base_page_vec: Vec<LogicalPage<Base>> = Vec::new();
-
-        // Initialize the base page vector. Unfortunately, we can't use `vec![...]` because
-        // logical pages cannot implement `Copy` - the vectors they store prevent this
-        for _ in [0..BASE_PAGES_PER_RANGE] {
-            base_page_vec.push(LogicalPage::new(num_columns, buffer_pool_manager.clone()));
-        }
+        let base_page_vec = (0..BASE_PAGES_PER_RANGE)
+            .map(|_| LogicalPage::new(num_columns, buffer_pool_manager.clone()))
+            .collect();
 
         PageRange {
             base_pages: base_page_vec,
@@ -152,54 +137,47 @@ impl PageRange {
         }
     }
 
-    pub fn read_base_record(&mut self, page: usize, offset: usize) -> Result<Vec<Option<i64>>, ()> {
+    /// Read an entire base record given the page index and physical offset.
+    pub fn read_base_record(&mut self, page: usize, offset: Offset) -> Result<Vec<Option<i64>>, DatabaseError> {
         self.base_pages[page].read(offset)
     }
 
-    pub fn read_tail_record(&mut self, page: usize, offset: usize) -> Result<Vec<Option<i64>>, ()> {
+    /// Read an entire tail record given the page index and physical offset.
+    pub fn read_tail_record(&mut self, page: usize, offset: Offset) -> Result<Vec<Option<i64>>, DatabaseError> {
         self.tail_pages[page].read(offset)
     }
 
-    pub fn update_base_indirection(&mut self, base_addr: BaseAddress, new_rid: RID) -> Result<(), ()> {
-        self.base_pages[base_addr.page].update_indirection(base_addr.offset, new_rid)
+    /// Update the indirection column of a base record given its address and the new RID.
+    pub fn update_base_indirection(&mut self, address: Address, new_rid: RID) -> Result<(), DatabaseError> {
+        self.base_pages[address.page].update_indirection(address.offset, new_rid)
     }
 
-    pub fn insert_tail(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>, schema_encoding: i64) -> (usize, usize) {
+    /// Insert a tail record into this page range. Returns the logical page index and physical offset.
+    pub fn insert_tail(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>, schema_encoding: i64) -> (usize, Offset) {
         let next_tail_page = self.tail_pages.len() - 1;
 
         match self.tail_pages[next_tail_page].insert(&columns, indirection, schema_encoding) {
-            Ok(offset) => {
-                // Record was inserted successfully
-                return (next_tail_page, offset);
-            },
-
+            Ok(offset) => (next_tail_page, offset),
             Err(_) => {
-                // Failed to insert record because there is no more space in the last tail page
                 // Add a new tail page and try to insert again
                 self.tail_pages.push(LogicalPage::new(self.num_columns, self.buffer_pool_manager.clone()));
 
-                // Note that although this call is recursive, it will have a depth of at most one
+                // Recursively insert which will have at most one level of recursion
                 return self.insert_tail(columns, indirection, schema_encoding);
             }
         }
     }
 
-    /// Insert a base record into this page range. Returns (page index, offset) if successful
-    /// and `Err(...)` otherwise.
-    pub fn insert_base(&mut self, columns: &Vec<Option<i64>>) -> Result<(usize, usize), ()> {
+    /// Insert a base record into this page range. Returns the logical page index and physical offset if successful
+    /// and an error otherwise.
+    pub fn insert_base(&mut self, columns: &Vec<Option<i64>>) -> Result<(usize, Offset), DatabaseError> {
         if self.next_base_page >= BASE_PAGES_PER_RANGE {
-            // We ran out of base pages - returning this error will trigger the creation
-            // of a new page range
-            return Err(());
+            return Err(DatabaseError::PageRangeFilled);
         }
 
         // We still have at least one base page left to fill... try to insert record
         match self.base_pages[self.next_base_page].insert(&columns) {
-            Ok(offset) => {
-                // Record was inserted successfully
-                return Ok((self.next_base_page, offset))
-            },
-
+            Ok(offset) => Ok((self.next_base_page, offset)),
             Err(_) => {
                 // Failed to insert record because there is no more space in the physical pages
                 // Increment the base page index and try to insert again
@@ -221,11 +199,8 @@ type LID = i64;
 
 /// Represents the address of a record. We obtain this address from the page directory,
 /// which maps from RIDs to physical addresses.
-
-// NOTE - We might want to rename this to `Address` since it should theoretically
-// work for base _and_ tail pages 
 #[derive(Clone, Copy)]
-struct BaseAddress {
+struct Address {
     /// Page range index.
     range: usize,
 
@@ -233,13 +208,13 @@ struct BaseAddress {
     page: usize,
 
     /// Physical page offset.
-    offset: usize
+    offset: Offset
 }
 
-impl BaseAddress {
+impl Address {
     // Create a new base address.
     pub fn new(range: usize, page: usize, offset: usize) -> Self {
-        BaseAddress {range, page, offset }
+        Address {range, page, offset }
     }
 }
 
@@ -262,7 +237,7 @@ pub struct Table {
     page_ranges: Vec<PageRange>,
 
     /// Page directory - maps from RIDs to base record addresses.
-    page_directory: HashMap<RID, BaseAddress>,
+    page_directory: HashMap<RID, Address>,
 
     /// Maps LIDs to RIDs.
     lid_to_rid: HashMap<LID, RID>,
@@ -270,7 +245,7 @@ pub struct Table {
     /// Index of the next available page range.
     next_page_range: usize,
 
-    /// Buffer pool manager shared by all tables
+    /// Buffer pool manager shared by all tables.
     buffer_pool_manager: Arc<Mutex<BufferPool>>
 }
 
@@ -285,199 +260,16 @@ impl Table {
 
         Table {
             name,
-            num_columns: num_columns,
-            key_column: key_column,
+            num_columns,
+            key_column,
             next_rid: 0,
 
-            // The last `NUM_METADATA_COLS` columns are the _indirection_ and _schema encoding_ columns,
-            // repsectively. The rest are defined by the user.
+            // The columns are _ | _ | ... | INDIRECTION | SCHEMA ENCODING
             page_ranges: vec![PageRange::new(num_columns + NUM_METADATA_COLS, buffer_pool_manager.clone())],
             page_directory: HashMap::new(),
             lid_to_rid: HashMap::new(),
             next_page_range: 0,
-            buffer_pool_manager: buffer_pool_manager
-        }
-    }
-
-    /// Update an existing record (in other words, insert a **tail record**).
-    pub fn update(&mut self, columns: Vec<Option<i64>>) -> PyResult<()> {
-        if columns.len() < self.num_columns {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Table has {} columns, but only {} were provided.", self.num_columns, columns.len()),
-            ));
-        }
-
-        if columns[self.key_column].is_none() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Key cannot be 'None'"),
-            ));
-        }
-
-        let key_value = columns[self.key_column].unwrap();
-
-        if self.lid_to_rid.get(&key_value).is_none() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Record with identifier {} doesn't exist.", key_value),
-            ));
-        }
-
-        let base_rid = self.lid_to_rid[&key_value];
-        let base_addr = self.page_directory[&base_rid];
-
-        // Grab the base page because we need to check the indirection column
-        match self.page_ranges[base_addr.range].read_base_record(base_addr.page, base_addr.offset) {
-            Ok(base_columns) => {
-                let indirection = base_columns[base_columns.len() - 2];
-
-                println!("[DEBUG] Indirection is {:?}", indirection);
-
-                // Generate the schema encoding value
-                let schema_encoding = bitmask(&columns, 1);
-
-                // We need to store this indirection when adding the tail page
-                let (page, offset) = if indirection.is_some() {
-                    self.page_ranges[base_addr.range].insert_tail(&columns, indirection, schema_encoding)
-                } else {
-                    self.page_ranges[base_addr.range].insert_tail(&columns, Some(base_rid as i64), schema_encoding)
-                };
-
-                // Add the new RID to physical address mapping
-                // NOTE - It's called "BaseAddress" but I (George) believe it can be used
-                // for _any_ record - not just base records
-                self.page_directory.insert(self.next_rid, BaseAddress::new(base_addr.range, page, offset));
-        
-                // Update the base record indirection column
-                match self.page_ranges[base_addr.range].update_base_indirection(base_addr, self.next_rid) {
-                    Ok(_) => {},
-                    Err(_) => panic!("[ERROR] Failed to update base record indirection column.")
-                }
-        
-                // Increment the RID for the next record
-                self.next_rid += 1;
-        
-                Ok(())
-            },
-
-            Err(_) => panic!("[ERROR] Failed to grab base record.")
-        }
-    }
-
-    /// Select the most recent version of a record given its primary key.
-    pub fn select(&mut self, primary_key: i64) -> PyResult<Vec<Option<i64>>> {
-        // First, determine the record's RID
-        match self.lid_to_rid.get(&primary_key) {
-            Some(base_rid) => {
-                // We now have the base record RID! Next, we need to see its indirection column
-                let base_addr = self.page_directory[&base_rid];
-                
-                match self.page_ranges[base_addr.range].read_base_record(base_addr.page, base_addr.offset) {
-                    Ok(columns) => {
-                        // Check if we should look for a tail record by checking the indirection column
-                        match columns[columns.len() - 2] {
-                            Some(tail_rid) => {
-                                // The base record's indirection column is pointing to a tail record - let's grab it
-                                // First, determine its address using the page directory
-                                let tail_addr = self.page_directory[&(tail_rid as usize)];
-
-                                // Next, read the tail record at this address
-                                match self.page_ranges[base_addr.range].read_tail_record(tail_addr.page, tail_addr.offset) {
-                                    Ok(tail_columns) => {
-                                        println!("[DEBUG] Have last tail record - {:?}", tail_columns);
-
-                                        // We now have the most recent tail record, but we may not have all of the columns
-                                        // since we are following a non-cumulative update scheme. Thus, we need to spin back
-                                        // the tail records using the indirection column until we have everything we want.
-
-                                        // This variable will store our final result
-                                        let mut result = tail_columns.clone();
-
-                                        // What's the value of the schema encoding column?
-                                        match tail_columns[tail_columns.len() - 1] {
-                                            Some(schema_encoding_value) => {
-                                                if schema_encoding_value == 0 {
-                                                    // There are no more updates - return the columns as they are
-                                                    return Ok(result);
-                                                }
-
-                                                // We need to spin back to find updates
-                                                let mut previous_indirection = tail_columns[tail_columns.len() - 2];
-                                                let mut previous_schema_encoding = tail_columns[tail_columns.len() - 1];
-
-                                                // While we still find something in the schema encoding, keep spinning backwwards
-                                                while previous_schema_encoding.is_some() || previous_schema_encoding != Some(0) {
-                                                    if previous_indirection.is_none() {
-                                                        println!("[DEBUG] Something went wrong... schema encoding suggests previous records exist but none were found.");
-                                                        return Ok(result);
-                                                    } else {
-                                                        println!("[DEBUG] Still have prev. indirection.");
-                                                    }
-
-                                                    // Find the address of the previous record
-                                                    let previous_addr = self.page_directory[&(previous_indirection.unwrap() as usize)];
-
-                                                    // Try getting the previous tail page
-                                                    match self.page_ranges[previous_addr.range].read_tail_record(previous_addr.page, previous_addr.offset) {
-                                                        Ok(previous_columns) => {
-                                                            println!("[DEBUG] Successfully got prev. tail page - it's {:?}", previous_columns);
-                                                            // We found the previous tail record and now have its columns!
-                                                            let this_schema_encoding = if previous_columns[previous_columns.len() - 1].is_some() {
-                                                                previous_columns[previous_columns.len() - 1].unwrap()
-                                                            } else {
-                                                                0
-                                                            };
-
-                                                            let mask = previous_schema_encoding.unwrap() ^ this_schema_encoding;
-                                                            copy_by_mask(&previous_columns, &mut result, mask);
-
-                                                            // Now update the previous indirection and schema encoding
-                                                            previous_indirection = previous_columns[previous_columns.len() - 2];
-                                                            previous_schema_encoding = previous_columns[previous_columns.len() - 1];
-                                                        },
-
-                                                        Err(_) => {
-                                                            println!("[DEBUG] Couldn't get tail page, trying to get base record...");
-                                                            // The previous record is most likely a base record - try again using the `read_base_record` function
-                                                            match self.page_ranges[previous_addr.range].read_base_record(previous_addr.page, previous_addr.offset) {
-                                                                Ok(previous_columns) => {
-                                                                    
-                                                                    // We found the base record and now have its columns!
-                                                                    println!("[DEBUG] Have base record but returning only tail results.");
-                                                                    break;
-                                                                },
-
-                                                                Err(_) => {
-                                                                    // Something else must have gone horribly wrong - abort
-                                                                    panic!("[ERROR] Failed to collect updates.")
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-
-                                                return Ok(result);
-                                            },
-
-                                            None => {
-                                                // There are no more updates - return the columns as they are
-                                                return Ok(result);
-                                            }
-                                        }
-                                    },
-                                    Err(_) => panic!("[ERROR] Failed to read most recent tail record.")
-                                }
-                            },
-
-                            None => Ok(columns) // No updates - return the base record as-is
-                        }
-                    },
-
-                    Err(_) => panic!("[DEBUG] Failed to read base record.")
-                }
-            },
-
-            None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Record with identifier {} doesn't exist.", primary_key),
-            ))
+            buffer_pool_manager
         }
     }
 
@@ -506,7 +298,7 @@ impl Table {
                 self.lid_to_rid.insert(columns[self.key_column], self.next_rid);
 
                 // Add the new RID to physical address mapping
-                self.page_directory.insert(self.next_rid, BaseAddress::new(self.next_page_range, page, offset));
+                self.page_directory.insert(self.next_rid, Address::new(self.next_page_range, page, offset));
                 
                 // Increment the RID for the next record
                 self.next_rid += 1;
@@ -522,5 +314,64 @@ impl Table {
                 return self.insert(columns);
             }
         }
+    }
+
+    /// Update an existing record (in other words, insert a **tail record**).
+    pub fn update(&mut self, columns: Vec<Option<i64>>) -> PyResult<()> {
+        if columns.len() < self.num_columns {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Table has {} columns, but only {} were provided.", self.num_columns, columns.len()),
+            ));
+        }
+
+        if columns[self.key_column].is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Key cannot be 'None'"),
+            ));
+        }
+
+        let key_value = columns[self.key_column].unwrap();
+
+        if self.lid_to_rid.get(&key_value).is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Record with identifier {} doesn't exist.", key_value),
+            ));
+        }
+
+        let base_rid = self.lid_to_rid[&key_value];
+        let base_address = self.page_directory[&base_rid];
+
+        // Grab the base page because we need to check the indirection column
+        match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset) {
+            Ok(base_columns) => {
+                let indirection = base_columns[base_columns.len() - 2];
+
+                // Generate the schema encoding value
+                let schema_encoding = bitmask(&columns, 1);
+
+                // We need to store this indirection when adding the tail page
+                let indirection_or_base_rid = indirection.unwrap_or(base_rid as i64);
+                let (page, offset) = self.page_ranges[base_address.range].insert_tail(&columns, Some(indirection_or_base_rid), schema_encoding);
+
+                // Add the new RID to physical address mapping
+                self.page_directory.insert(self.next_rid, Address::new(base_address.range, page, offset));
+        
+                // Update the base record indirection column
+                self.page_ranges[base_address.range].update_base_indirection(base_address, self.next_rid)
+                    .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to update base record indirection column."))?;
+
+                // Increment the RID for the next record
+                self.next_rid += 1;
+        
+                Ok(())
+            },
+
+            Err(_) => panic!("[ERROR] Failed to grab base record.")
+        }
+    }
+
+    /// Select the most recent version of a record given its primary key.
+    pub fn select(&mut self, primary_key: i64) -> PyResult<Vec<Option<i64>>> {
+        unimplemented!()
     }
 }
