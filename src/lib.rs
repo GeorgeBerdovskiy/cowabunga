@@ -5,6 +5,7 @@ mod bufferpool;
 mod table;
 mod helpers;
 mod errors;
+mod index;
 
 #[pymodule]
 fn buffer_pool_module(_py: Python, m: &PyModule) -> PyResult<()> {

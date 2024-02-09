@@ -7,6 +7,7 @@ use crate::constants::*;
 use crate::bufferpool::*;
 use crate::errors::DatabaseError;
 use crate::helpers::*;
+use crate::index::*;
 
 /// Empty type representing **base** pages.
 #[derive(Clone, Copy)]
@@ -215,7 +216,7 @@ pub struct Table {
     /// Name of the table.
     name: String,
 
-    /// Number of columns.
+    /// Number of user defined columns columns.
     num_columns: usize,
 
     /// Index of the primary key column.
@@ -237,7 +238,11 @@ pub struct Table {
     next_page_range: usize,
 
     /// Buffer pool manager shared by all tables.
-    buffer_pool_manager: Arc<Mutex<BufferPool>>
+    buffer_pool_manager: Arc<Mutex<BufferPool>>,
+
+    /// Create a vector that stores all the indexes
+    indexes: Vec<HashMapIndex>
+    
 }
 
 #[pymethods]
@@ -248,6 +253,10 @@ impl Table {
     pub fn new(name: String, num_columns: usize, key_column: usize, buffer_pool_manager: &PyAny) -> Self {
         let buffer_pool_manager = buffer_pool_manager.extract::<PyRef<BufferPool>>().unwrap();
         let buffer_pool_manager = Arc::new(Mutex::new(buffer_pool_manager.clone()));
+        let mut indexes = Vec::with_capacity(num_columns);
+        for _ in 0..num_columns {
+            indexes.push(HashMapIndex::new());
+        }
 
         Table {
             name,
@@ -260,7 +269,8 @@ impl Table {
             page_directory: HashMap::new(),
             lid_to_rid: HashMap::new(),
             next_page_range: 0,
-            buffer_pool_manager
+            buffer_pool_manager,
+            indexes,
         }
     }
 
@@ -269,7 +279,7 @@ impl Table {
         // Some functions take a vector of optionals rather than integers because updates use `None`
         // to signal that a value isn't updated. However, we want to require that all columns are
         // provided for _new_ records. For this reason, we wrap them inside `Some` here.
-        let columns_wrapped: Vec<Option<i64>> = columns.iter().map(|val| Some(*val)).collect();
+        let columns_wrapped: Vec<Option<i64>> = columns.iter().map(|val: &i64| Some(*val)).collect();
 
         if columns.len() < self.num_columns {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -290,6 +300,13 @@ impl Table {
 
                 // Add the new RID to physical address mapping
                 self.page_directory.insert(self.next_rid, Address::new(self.next_page_range, page, offset));
+
+                // Here is where I am going to add the indexing logic
+                for (i, &column_value) in columns.iter().enumerate() {
+                    if let Some(hash_map_index) = self.indexes.get_mut(i){
+                        hash_map_index.add_hash(column_value, self.next_rid);
+                    }
+                }
                 
                 // Increment the RID for the next record
                 self.next_rid += 1;
