@@ -405,6 +405,12 @@ impl Table {
 		let rid = self.lid_to_rid[&search_key];
 		let base_address = self.page_directory[&rid];
 
+        if search_key_index >= self.num_columns || search_key_index < 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Table has {} columns, but the index of {} was provided.", self.num_columns, search_key_index),
+            ));
+        }
+
 		// First, get the base record
 		match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset) {
 			Ok(base_columns) => {
