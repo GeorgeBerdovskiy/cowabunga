@@ -209,14 +209,34 @@ impl Address {
     }
 }
 
+#[pyclass]
+pub struct PyRecord {
+    #[pyo3(get)]
+    pub rid: RID,
+    #[pyo3(get)]
+    pub key: LID,
+    #[pyo3(get)]
+    pub columns: Vec<Option<i64>>
+}
+
+#[pymethods]
+impl PyRecord {
+    #[new]
+    pub fn new(rid: RID, key: LID, columns: Vec<Option<i64>>) -> Self {
+        PyRecord { rid, key, columns }
+    }
+}
+
 /// Represents a table and is exposed by PyO3.
 #[pyclass]
 pub struct Table {
     /// Name of the table.
-    name: String,
+    #[pyo3(get)]
+    pub name: String,
 
     /// Number of columns.
-    num_columns: usize,
+    #[pyo3(get)]
+    pub num_columns: usize,
 
     /// Index of the primary key column.
     key_column: usize,
@@ -395,12 +415,13 @@ impl Table {
         }
     }
 
-	pub fn print(&self) {
+	pub fn print(&self) -> PyResult<()> {
 		self.buffer_pool_manager.lock().unwrap().print_all();
+        Ok(())
 	}
 
     /// Select the most recent version of a record given its primary key.
-    pub fn select(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<i8>) -> PyResult<Vec<Option<i64>>> {
+    pub fn select(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<i8>) -> PyResult<Vec<PyRecord>> {
 		// TODO - Right now, this assumes we always use the primary key. That's wrong - fix it later
 		let rid = self.lid_to_rid[&search_key];
 		let base_address = self.page_directory[&rid];
@@ -411,9 +432,12 @@ impl Table {
 				// Check if we have a most recent tail record
 				if base_columns[base_columns.len() - 1].is_none() {
 					// There is no record more recent than this one! Return it
-					// TODO - See if there is a more "efficient" way of doing this, because I'm pretty sure `into_iter` isn't cheap
 
-					return Ok(base_columns.into_iter().take(self.num_columns).collect());
+					// TODO - See if there is a more "efficient" way of doing this, because I'm pretty sure `into_iter` isn't cheap
+                    // TODO: is this the correct rid to use?
+
+                    let ret_rec = PyRecord::new(rid, search_key, base_columns.into_iter().take(self.num_columns).collect());
+					return Ok(vec![ret_rec]);
 				}
 
 				// We DO have a most recent tail record - let's find it!
@@ -421,7 +445,10 @@ impl Table {
 				let tail_address = self.page_directory[&(tail_rid as usize)];
 
 				match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset) {
-					Ok(tail_columns) => return Ok(tail_columns.into_iter().take(self.num_columns).collect()),
+					Ok(tail_columns) => {
+                        let ret_rec = PyRecord::new(rid, search_key, tail_columns.into_iter().take(self.num_columns).collect());
+                        return Ok(vec![ret_rec]);
+                    },
 					Err(_) => {
 						// Do nothing for now
 					}
@@ -433,6 +460,7 @@ impl Table {
 			}
 		}
 
+        // if the above failed, just return empty Vec.
 		Ok(vec![])
     }
 }
