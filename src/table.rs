@@ -1,6 +1,4 @@
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
-use core::num;
 use std::collections::{BTreeMap, HashSet};
 use std::{collections::HashMap, marker::PhantomData};
 use std::sync::{Arc, Mutex};
@@ -9,7 +7,6 @@ use std::ops::Bound::Included;
 use crate::constants::*;
 use crate::bufferpool::*;
 use crate::errors::DatabaseError;
-use crate::helpers::*;
 
 /// Empty type representing **base** pages.
 #[derive(Clone, Copy)]
@@ -283,7 +280,6 @@ impl Indexer {
     /// `None` values) so it should be safe to unwrap the values inside `columns`
     pub fn insert(&mut self, columns: &Vec<i64>, rid: RID) {
         for (column_value, tree) in columns.iter().zip(self.b_trees.iter_mut()) {
-            // tree.insert(*column_value, self.next_rid);
             if tree.contains_key(&column_value) {
                 tree.get_mut(&column_value).unwrap().insert(rid);
             } else {
@@ -291,6 +287,25 @@ impl Indexer {
                 tree.insert(*column_value, HashSet::from([rid]));
             }
         }
+    }
+
+    pub fn add_column_index(&mut self, value: i64, column: usize, base_rid: RID) {
+        if self.b_trees[column].contains_key(&value) {
+            self.b_trees[column].get_mut(&value).unwrap().insert(base_rid);
+        } else {
+            // Doesn't contain the key yet - insert
+            self.b_trees[column].insert(value, HashSet::from([base_rid]));
+        }
+    }
+
+    /// Update the index of a column given a RID, the original value, and the new value. This will delete
+    /// (original, RID) from the corresponding b-tree and add (update, RID) to the b-tree.
+    pub fn update_column_index(&mut self, original: i64, update: i64, column: usize, base_rid: RID) {
+        // Delete the old pair
+        self.b_trees[column].get_mut(&original).unwrap().remove(&base_rid);
+
+        // Now add the RID to the correct hash set
+        self.add_column_index(update, column, base_rid);
     }
 
     /// Given a start key, an end key, and a column index, return all of the RIDs stored under
@@ -444,7 +459,7 @@ impl Table {
 							// This column is being updated, so use the updated value
 							*target = *update;
 
-                            // TODO - Update the indexes for all the columns
+                            self.indexer.update_column_index(original.unwrap(), update.unwrap(), i, base_rid);
 						}
 
                         i += 1;

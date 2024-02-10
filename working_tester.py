@@ -17,17 +17,7 @@ insert_time_1 = process_time()
 
 print("Inserting 10k records took:  \t\t\t", insert_time_1 - insert_time_0)
 
-# Measuring Aggregate Performance
-agg_time_0 = process_time()
-for i in range(0, 10000, 100):
-    start_value = 906659671 + i
-    end_value = start_value + 100
-    result = grades_table.sum(start_value, end_value - 1, randrange(0, 5))
-    print(result)
-agg_time_1 = process_time()
-print("Aggregate 10k of 100 record batch took:\t", agg_time_1 - agg_time_0)
-
-'''# Measuring update Performance
+# Measuring update Performance
 update_cols = [
     [None, None, None, None, None],
     [None, randrange(0, 100), None, None, None],
@@ -49,4 +39,13 @@ for i in range(0, 10000):
     print(result)
 select_time_1 = process_time()
 print("Selecting 10k records took:  \t\t\t", select_time_1 - select_time_0)
-'''
+
+# Measuring Aggregate Performance
+agg_time_0 = process_time()
+for i in range(0, 10000, 100):
+    start_value = 906659671 + i
+    end_value = start_value + 100
+    result = grades_table.sum(start_value, end_value - 1, randrange(0, 5))
+    print(result)
+agg_time_1 = process_time()
+print("Aggregate 10k of 100 record batch took:\t", agg_time_1 - agg_time_0)
