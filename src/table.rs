@@ -1,12 +1,12 @@
 use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use std::collections::{BTreeMap, HashSet};
 use std::{collections::HashMap, marker::PhantomData};
 use std::sync::{Arc, Mutex};
+use std::ops::Bound::Included;
 
 use crate::constants::*;
 use crate::bufferpool::*;
 use crate::errors::DatabaseError;
-use crate::helpers::*;
 
 /// Empty type representing **base** pages.
 #[derive(Clone, Copy)]
@@ -40,10 +40,18 @@ impl<T> LogicalPage<T> {
     }
 
     /// Read from every column in this logical page given an offset.
-    pub fn read(&self, offset: Offset) -> Result<Vec<Option<i64>>, DatabaseError>{
-        self.columns.iter()
-            .map(|column| self.buffer_pool_manager.lock().unwrap().read(*column, offset))
-            .collect()
+    pub fn read(&self, offset: Offset, projection: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError>{
+        let mut result = Vec::new();
+
+        for i in 0..projection.len() {
+            if projection[i] == 0 {
+                continue;
+            }
+
+            result.push(self.buffer_pool_manager.lock().unwrap().read(self.columns[i], offset)?);
+        }
+
+        Ok(result)
     }
 }
 
@@ -129,13 +137,13 @@ impl PageRange {
     }
 
     /// Read an entire base record given the page index and physical offset.
-    pub fn read_base_record(&mut self, page: usize, offset: Offset) -> Result<Vec<Option<i64>>, DatabaseError> {
-        self.base_pages[page].read(offset)
+    pub fn read_base_record(&self, page: usize, offset: Offset, projection: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
+        self.base_pages[page].read(offset, projection)
     }
 
     /// Read an entire tail record given the page index and physical offset.
-    pub fn read_tail_record(&mut self, page: usize, offset: Offset) -> Result<Vec<Option<i64>>, DatabaseError> {
-        self.tail_pages[page].read(offset)
+    pub fn read_tail_record(&self, page: usize, offset: Offset, projection: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
+        self.tail_pages[page].read(offset, projection)
     }
 
     /// Update the indirection column of a base record given its address and the new RID.
@@ -190,7 +198,7 @@ type LID = i64;
 
 /// Represents the address of a record. We obtain this address from the page directory,
 /// which maps from RIDs to physical addresses.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct Address {
     /// Page range index.
     range: usize,
@@ -237,7 +245,80 @@ pub struct Table {
     next_page_range: usize,
 
     /// Buffer pool manager shared by all tables.
-    buffer_pool_manager: Arc<Mutex<BufferPool>>
+    buffer_pool_manager: Arc<Mutex<BufferPool>>,
+
+    /// B-Tree indexes on all columns (except metadata).
+    indexer: Indexer
+}
+
+/// Represents the indexer of a table.
+struct Indexer {
+    /// If enabled[i] is `false`, the index for column `i` is considered dropped.
+    enabled: Vec<bool>,
+
+    /// B-Tree indexes for every column except for metadata columns.
+    b_trees: Vec<BTreeMap<i64, HashSet<RID>>>
+}
+
+impl Indexer {
+    /// Initialize a new indexer.
+    pub fn new(num_columns: usize) -> Self {
+        // The default is that no index exists for any column, except for the primary key
+
+        let mut enabled_vec = vec![false; num_columns];
+        enabled_vec[0] = true;
+
+        Indexer {
+            enabled: enabled_vec,
+            b_trees: vec![BTreeMap::new(); num_columns]
+        }
+    }
+
+    /// Inserts a key, RID pair. If the key is already present in the tree, add the RID
+    /// to its hash set. Otherwise, create a new hashset with only the RID present.
+    /// NOTE - This function should only be called on completely filled rows (or, rows without
+    /// `None` values) so it should be safe to unwrap the values inside `columns`
+    pub fn insert(&mut self, columns: &Vec<i64>, rid: RID) {
+        for (column_value, tree) in columns.iter().zip(self.b_trees.iter_mut()) {
+            if tree.contains_key(&column_value) {
+                tree.get_mut(&column_value).unwrap().insert(rid);
+            } else {
+                // Doesn't contain the key yet - insert
+                tree.insert(*column_value, HashSet::from([rid]));
+            }
+        }
+    }
+
+    pub fn add_column_index(&mut self, value: i64, column: usize, base_rid: RID) {
+        if self.b_trees[column].contains_key(&value) {
+            self.b_trees[column].get_mut(&value).unwrap().insert(base_rid);
+        } else {
+            // Doesn't contain the key yet - insert
+            self.b_trees[column].insert(value, HashSet::from([base_rid]));
+        }
+    }
+
+    /// Update the index of a column given a RID, the original value, and the new value. This will delete
+    /// (original, RID) from the corresponding b-tree and add (update, RID) to the b-tree.
+    pub fn update_column_index(&mut self, original: i64, update: i64, column: usize, base_rid: RID) {
+        // Delete the old pair
+        self.b_trees[column].get_mut(&original).unwrap().remove(&base_rid);
+
+        // Now add the RID to the correct hash set
+        self.add_column_index(update, column, base_rid);
+    }
+
+    /// Given a start key, an end key, and a column index, return all of the RIDs stored under
+    /// that range of keys
+    fn locate_range(&self, start_key: i64, end_key: i64, column: usize) -> Vec<RID> {
+        let mut result = Vec::new();
+
+        for (&key, value) in self.b_trees[column].range((Included(&start_key), Included(&end_key))) {
+            result.extend(value);
+        }
+
+        result
+    }
 }
 
 #[pymethods]
@@ -260,7 +341,9 @@ impl Table {
             page_directory: HashMap::new(),
             lid_to_rid: HashMap::new(),
             next_page_range: 0,
-            buffer_pool_manager
+            buffer_pool_manager,
+
+            indexer: Indexer::new(num_columns)
         }
     }
 
@@ -291,6 +374,8 @@ impl Table {
                 // Add the new RID to physical address mapping
                 self.page_directory.insert(self.next_rid, Address::new(self.next_page_range, page, offset));
                 
+                self.indexer.insert(&columns, self.next_rid);
+
                 // Increment the RID for the next record
                 self.next_rid += 1;
 
@@ -330,7 +415,7 @@ impl Table {
 		let mut cumulative_columns: Vec<Option<i64>> = vec![None; self.num_columns + NUM_METADATA_COLS];
 
         // Grab the base page because we need to check the indirection column
-        match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset) {
+        match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, &vec![1; self.num_columns + NUM_METADATA_COLS]) {
             Ok(base_columns) => {
                 let indirection = base_columns[base_columns.len() - 1];
 
@@ -339,7 +424,7 @@ impl Table {
 					let tail_rid = indirection.unwrap();
 					let tail_address = self.page_directory[&(tail_rid as usize)];
 
-					match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset) {
+					match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &vec![1; self.num_columns + NUM_METADATA_COLS]) {
 						Ok(tail_columns) => {
 							// We've got the tail columns - let's combine them with the requested updates
 							for (update, (original, target)) in columns.iter().zip(tail_columns.iter().zip(cumulative_columns.iter_mut())) {
@@ -362,6 +447,9 @@ impl Table {
 						}
 					}
 				} else {
+                    // TODO - Fix this (mixing indexes with iterators is probably not a good idea)
+                    let mut i = 0;
+
 					// This is our first update, so columns that aren't updated should come from `base_columns`
 					for (update, (original, target)) in columns.iter().zip(base_columns.iter().zip(cumulative_columns.iter_mut())) {
 						if update.is_none() {
@@ -370,7 +458,11 @@ impl Table {
 						} else {
 							// This column is being updated, so use the updated value
 							*target = *update;
+
+                            self.indexer.update_column_index(original.unwrap(), update.unwrap(), i, base_rid);
 						}
+
+                        i += 1;
 					}
 				}
 
@@ -395,33 +487,63 @@ impl Table {
         }
     }
 
-	pub fn print(&self) {
-		self.buffer_pool_manager.lock().unwrap().print_all();
-	}
+    pub fn print(&self) {
+        self.buffer_pool_manager.lock().unwrap().print_all();
+    }
 
     /// Select the most recent version of a record given its primary key.
-    pub fn select(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<i8>) -> PyResult<Vec<Option<i64>>> {
-		// TODO - Right now, this assumes we always use the primary key. That's wrong - fix it later
+    pub fn select(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<usize>) -> PyResult<Vec<Option<i64>>> {
+        // TODO - Right now, this assumes we always use the primary key. That's wrong - fix it later
 		let rid = self.lid_to_rid[&search_key];
-		let base_address = self.page_directory[&rid];
+
+        let mut projected_columns = projected_columns;
+        projected_columns.push(1);
+
+		Ok(self.select_by_rid(rid, &projected_columns).unwrap())
+    }
+
+    pub fn sum(&self, start_range: i64, end_range: i64, column_index: usize) -> PyResult<i64> {
+        let rids = self.indexer.locate_range(start_range, end_range, self.key_column);
+
+        // One hot encoding 🔥🥵
+        let mut projection = vec![0; self.num_columns];
+        projection[column_index] = 1;
+        projection.push(1);
+
+        let mut sum = 0;
+        for rid in rids {
+            // Grab the value of the specified column in the record identified by `rid`.
+            // If it returns `Some(value)`, add the value to the sum. Otherwise, add zero (this
+            // technically shouldn't happen).
+            sum += match self.select_by_rid(rid, &projection).unwrap()[0] {
+                Some(val) => val,
+                None => 0
+            };
+        }
+
+        Ok(sum)
+    }
+}
+
+impl Table {
+    fn select_by_rid(&self, rid: RID, projection: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
+        let base_address = self.page_directory[&rid];
 
 		// First, get the base record
-		match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset) {
+		match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, projection) {
 			Ok(base_columns) => {
 				// Check if we have a most recent tail record
 				if base_columns[base_columns.len() - 1].is_none() {
 					// There is no record more recent than this one! Return it
-					// TODO - See if there is a more "efficient" way of doing this, because I'm pretty sure `into_iter` isn't cheap
-
-					return Ok(base_columns.into_iter().take(self.num_columns).collect());
+					return Ok(base_columns.into_iter().take(projection.len() - 2).collect());
 				}
 
 				// We DO have a most recent tail record - let's find it!
 				let tail_rid = base_columns[base_columns.len() - 1].unwrap();
 				let tail_address = self.page_directory[&(tail_rid as usize)];
 
-				match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset) {
-					Ok(tail_columns) => return Ok(tail_columns.into_iter().take(self.num_columns).collect()),
+				match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, projection) {
+					Ok(tail_columns) => return Ok(tail_columns.into_iter().take(projection.len() - 2).collect()),
 					Err(_) => {
 						// Do nothing for now
 					}
