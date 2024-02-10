@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
-use std::collections::BTreeMap;
+use core::num;
+use std::collections::{BTreeMap, HashSet};
 use std::{collections::HashMap, marker::PhantomData};
 use std::sync::{Arc, Mutex};
 use std::ops::Bound::Included;
@@ -250,7 +251,59 @@ pub struct Table {
     buffer_pool_manager: Arc<Mutex<BufferPool>>,
 
     /// B-Tree indexes on all columns (except metadata).
-    b_tree_indexes: Vec<BTreeMap<i64, RID>>
+    indexer: Indexer
+}
+
+/// Represents the indexer of a table.
+struct Indexer {
+    /// If enabled[i] is `false`, the index for column `i` is considered dropped.
+    enabled: Vec<bool>,
+
+    /// B-Tree indexes for every column except for metadata columns.
+    b_trees: Vec<BTreeMap<i64, HashSet<RID>>>
+}
+
+impl Indexer {
+    /// Initialize a new indexer.
+    pub fn new(num_columns: usize) -> Self {
+        // The default is that no index exists for any column, except for the primary key
+
+        let mut enabled_vec = vec![false; num_columns];
+        enabled_vec[0] = true;
+
+        Indexer {
+            enabled: enabled_vec,
+            b_trees: vec![BTreeMap::new(); num_columns]
+        }
+    }
+
+    /// Inserts a key, RID pair. If the key is already present in the tree, add the RID
+    /// to its hash set. Otherwise, create a new hashset with only the RID present.
+    /// NOTE - This function should only be called on completely filled rows (or, rows without
+    /// `None` values) so it should be safe to unwrap the values inside `columns`
+    pub fn insert(&mut self, columns: &Vec<i64>, rid: RID) {
+        for (column_value, tree) in columns.iter().zip(self.b_trees.iter_mut()) {
+            // tree.insert(*column_value, self.next_rid);
+            if tree.contains_key(&column_value) {
+                tree.get_mut(&column_value).unwrap().insert(rid);
+            } else {
+                // Doesn't contain the key yet - insert
+                tree.insert(*column_value, HashSet::from([rid]));
+            }
+        }
+    }
+
+    /// Given a start key, an end key, and a column index, return all of the RIDs stored under
+    /// that range of keys
+    fn locate_range(&self, start_key: i64, end_key: i64, column: usize) -> Vec<RID> {
+        let mut result = Vec::new();
+
+        for (&key, value) in self.b_trees[column].range((Included(&start_key), Included(&end_key))) {
+            result.extend(value);
+        }
+
+        result
+    }
 }
 
 #[pymethods]
@@ -275,7 +328,7 @@ impl Table {
             next_page_range: 0,
             buffer_pool_manager,
 
-            b_tree_indexes: vec![BTreeMap::new(); num_columns]
+            indexer: Indexer::new(num_columns)
         }
     }
 
@@ -306,6 +359,8 @@ impl Table {
                 // Add the new RID to physical address mapping
                 self.page_directory.insert(self.next_rid, Address::new(self.next_page_range, page, offset));
                 
+                self.indexer.insert(&columns, self.next_rid);
+
                 // Increment the RID for the next record
                 self.next_rid += 1;
 
@@ -377,6 +432,9 @@ impl Table {
 						}
 					}
 				} else {
+                    // TODO - Fix this (mixing indexes with iterators is probably not a good idea)
+                    let mut i = 0;
+
 					// This is our first update, so columns that aren't updated should come from `base_columns`
 					for (update, (original, target)) in columns.iter().zip(base_columns.iter().zip(cumulative_columns.iter_mut())) {
 						if update.is_none() {
@@ -385,7 +443,11 @@ impl Table {
 						} else {
 							// This column is being updated, so use the updated value
 							*target = *update;
+
+                            // TODO - Update the indexes for all the columns
 						}
+
+                        i += 1;
 					}
 				}
 
@@ -425,22 +487,13 @@ impl Table {
 		Ok(self.select_by_rid(rid, &projected_columns).unwrap())
     }
 
-    fn locate_range(&self, start_key: i64, end_key: i64, column: usize) -> Vec<RID> {
-        let mut result = Vec::new();
-
-        for (&key, &value) in self.b_tree_indexes[column].range((Included(&start_key), Included(&end_key))) {
-            result.push(value);
-        }
-
-        result
-    }
-
     pub fn sum(&self, start_range: i64, end_range: i64, column_index: usize) -> PyResult<i64> {
-        let rids = self.locate_range(start_range, end_range, self.key_column);
+        let rids = self.indexer.locate_range(start_range, end_range, self.key_column);
 
         // One hot encoding 🔥🥵
         let mut projection = vec![0; self.num_columns];
         projection[column_index] = 1;
+        projection.push(1);
 
         let mut sum = 0;
         for rid in rids {
