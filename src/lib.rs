@@ -19,8 +19,15 @@ fn table_module(_py: Python, m: &PyModule) -> PyResult<()> {
 }
 
 #[pymodule]
+fn record_type_module(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<table::PyRecord>()?;
+    Ok(())
+}
+
+#[pymodule]
 fn cowabunga_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pymodule!(table_module))?;
     m.add_wrapped(wrap_pymodule!(buffer_pool_module))?;
+    m.add_wrapped(wrap_pymodule!(record_type_module))?;
     Ok(())
 }

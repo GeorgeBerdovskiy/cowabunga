@@ -68,7 +68,7 @@ impl LogicalPage<Base> {
         }
 
         // Write the indirection column, which is last
-		self.buffer_pool_manager.lock().unwrap().write_next(self.columns[self.columns.len() - 1], None)?;
+        self.buffer_pool_manager.lock().unwrap().write_next(self.columns[self.columns.len() - 1], None)?;
 
         Ok(offset)
     }
@@ -217,14 +217,34 @@ impl Address {
     }
 }
 
+#[pyclass]
+pub struct PyRecord {
+    #[pyo3(get)]
+    pub rid: RID,
+    #[pyo3(get)]
+    pub key: LID,
+    #[pyo3(get)]
+    pub columns: Vec<Option<i64>>
+}
+
+#[pymethods]
+impl PyRecord {
+    #[new]
+    pub fn new(rid: RID, key: LID, columns: Vec<Option<i64>>) -> Self {
+        PyRecord { rid, key, columns }
+    }
+}
+
 /// Represents a table and is exposed by PyO3.
 #[pyclass]
 pub struct Table {
     /// Name of the table.
-    name: String,
+    #[pyo3(get)]
+    pub name: String,
 
     /// Number of columns.
-    num_columns: usize,
+    #[pyo3(get)]
+    pub num_columns: usize,
 
     /// Index of the primary key column.
     key_column: usize,
@@ -411,63 +431,63 @@ impl Table {
         let base_rid = self.lid_to_rid[&key_value];
         let base_address = self.page_directory[&base_rid];
 
-		// Since we're using the cumulative update scheme, we need to grab the remaining values first
-		let mut cumulative_columns: Vec<Option<i64>> = vec![None; self.num_columns + NUM_METADATA_COLS];
+        // Since we're using the cumulative update scheme, we need to grab the remaining values first
+        let mut cumulative_columns: Vec<Option<i64>> = vec![None; self.num_columns + NUM_METADATA_COLS];
 
         // Grab the base page because we need to check the indirection column
         match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, &vec![1; self.num_columns + NUM_METADATA_COLS]) {
             Ok(base_columns) => {
                 let indirection = base_columns[base_columns.len() - 1];
 
-				if indirection.is_some() {
-					// We need to grab the last tail record
-					let tail_rid = indirection.unwrap();
-					let tail_address = self.page_directory[&(tail_rid as usize)];
+                if indirection.is_some() {
+                    // We need to grab the last tail record
+                    let tail_rid = indirection.unwrap();
+                    let tail_address = self.page_directory[&(tail_rid as usize)];
 
-					match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &vec![1; self.num_columns + NUM_METADATA_COLS]) {
-						Ok(tail_columns) => {
-							// We've got the tail columns - let's combine them with the requested updates
-							for (update, (original, target)) in columns.iter().zip(tail_columns.iter().zip(cumulative_columns.iter_mut())) {
-								if update.is_none() {
-									// This column isn't being updated, so use the original value
-									*target = *original;
-								} else {
-									// This column is being updated, so use the updated value
-									*target = *update;
-								}
-							}
-						},
+                    match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &vec![1; self.num_columns + NUM_METADATA_COLS]) {
+                        Ok(tail_columns) => {
+                            // We've got the tail columns - let's combine them with the requested updates
+                            for (update, (original, target)) in columns.iter().zip(tail_columns.iter().zip(cumulative_columns.iter_mut())) {
+                                if update.is_none() {
+                                    // This column isn't being updated, so use the original value
+                                    *target = *original;
+                                } else {
+                                    // This column is being updated, so use the updated value
+                                    *target = *update;
+                                }
+                            }
+                        },
 
-						Err(error) => {
-							// We couldn't access the tail record for some reason. For now, return an error. Later, default
-							// to using the base columns and generate a warning or something like that.
-							return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-								format!("Failed to retrieve tail record."),
-							));
-						}
-					}
-				} else {
+                        Err(error) => {
+                            // We couldn't access the tail record for some reason. For now, return an error. Later, default
+                            // to using the base columns and generate a warning or something like that.
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                format!("Failed to retrieve tail record."),
+                            ));
+                        }
+                    }
+                } else {
                     // TODO - Fix this (mixing indexes with iterators is probably not a good idea)
                     let mut i = 0;
 
-					// This is our first update, so columns that aren't updated should come from `base_columns`
-					for (update, (original, target)) in columns.iter().zip(base_columns.iter().zip(cumulative_columns.iter_mut())) {
-						if update.is_none() {
-							// This column isn't being updated, so use the original value
-							*target = *original;
-						} else {
-							// This column is being updated, so use the updated value
-							*target = *update;
+                    // This is our first update, so columns that aren't updated should come from `base_columns`
+                    for (update, (original, target)) in columns.iter().zip(base_columns.iter().zip(cumulative_columns.iter_mut())) {
+                        if update.is_none() {
+                            // This column isn't being updated, so use the original value
+                            *target = *original;
+                        } else {
+                            // This column is being updated, so use the updated value
+                            *target = *update;
 
                             self.indexer.update_column_index(original.unwrap(), update.unwrap(), i, base_rid);
-						}
+                        }
 
                         i += 1;
-					}
-				}
+                    }
+                }
 
-				// At this point, `cumulative_columns` contains all of our changes and original data that wasn't updated
-				let indirection_or_base_rid = indirection.unwrap_or(base_rid as i64);
+                // At this point, `cumulative_columns` contains all of our changes and original data that wasn't updated
+                let indirection_or_base_rid = indirection.unwrap_or(base_rid as i64);
                 let (page, offset) = self.page_ranges[base_address.range].insert_tail(&cumulative_columns, Some(indirection_or_base_rid));
 
                 // Add the new RID to physical address mapping
@@ -487,19 +507,28 @@ impl Table {
         }
     }
 
-    pub fn print(&self) {
+    pub fn print(&self) -> PyResult<()> {
         self.buffer_pool_manager.lock().unwrap().print_all();
+        Ok(())
     }
 
     /// Select the most recent version of a record given its primary key.
-    pub fn select(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<usize>) -> PyResult<Vec<Option<i64>>> {
+    pub fn select(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<usize>) -> PyResult<Vec<PyRecord>> {
         // TODO - Right now, this assumes we always use the primary key. That's wrong - fix it later
-		let rid = self.lid_to_rid[&search_key];
+        let rid = self.lid_to_rid[&search_key];
 
         let mut projected_columns = projected_columns;
         projected_columns.push(1);
 
-		Ok(self.select_by_rid(rid, &projected_columns).unwrap())
+        match self.select_by_rid(rid, &projected_columns) {
+            Ok(row_vec) => {
+                return Ok(vec!(PyRecord::new(rid, search_key, row_vec)));
+            },
+            Err(db_err) => {
+                // error not yet handled.
+                panic!("Couldn't select_by_rid.")
+            }
+        }
     }
 
     pub fn sum(&self, start_range: i64, end_range: i64, column_index: usize) -> PyResult<i64> {
@@ -529,32 +558,33 @@ impl Table {
     fn select_by_rid(&self, rid: RID, projection: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
         let base_address = self.page_directory[&rid];
 
-		// First, get the base record
-		match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, projection) {
-			Ok(base_columns) => {
-				// Check if we have a most recent tail record
-				if base_columns[base_columns.len() - 1].is_none() {
-					// There is no record more recent than this one! Return it
-					return Ok(base_columns.into_iter().take(projection.len() - 2).collect());
-				}
+        // First, get the base record
+        match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, projection) {
+            Ok(base_columns) => {
+                // Check if we have a most recent tail record
+                if base_columns[base_columns.len() - 1].is_none() {
+                    // There is no record more recent than this one! Return it
+                    return Ok(base_columns.into_iter().take(projection.len() - 2).collect());
+                }
 
-				// We DO have a most recent tail record - let's find it!
-				let tail_rid = base_columns[base_columns.len() - 1].unwrap();
-				let tail_address = self.page_directory[&(tail_rid as usize)];
+                // We DO have a most recent tail record - let's find it!
+                let tail_rid = base_columns[base_columns.len() - 1].unwrap();
+                let tail_address = self.page_directory[&(tail_rid as usize)];
 
-				match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, projection) {
-					Ok(tail_columns) => return Ok(tail_columns.into_iter().take(projection.len() - 2).collect()),
-					Err(_) => {
-						// Do nothing for now
-					}
-				}
-			},
+                match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, projection) {
+                    Ok(tail_columns) => return Ok(tail_columns.into_iter().take(projection.len() - 2).collect()),
+                    Err(_) => {
+                        // Do nothing for now
+                    }
+                }
+            },
 
-			Err(_) => {
-				// Do nothing for now
-			}
-		}
+            Err(_) => {
+                // Do nothing for now
+            }
+        }
 
-		Ok(vec![])
+        // if the above failed, just return empty Vec.
+        Ok(vec![])
     }
 }
