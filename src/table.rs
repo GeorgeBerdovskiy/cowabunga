@@ -514,21 +514,27 @@ impl Table {
 
     /// Select the most recent version of a record given its primary key.
     pub fn select(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<usize>) -> PyResult<Vec<PyRecord>> {
-        // TODO - Right now, this assumes we always use the primary key. That's wrong - fix it later
-        let rid = self.lid_to_rid[&search_key];
+        let rids = self.indexer.locate_range(search_key, search_key, search_key_index);
+        let mut results: Vec<PyRecord> = Vec::new();
 
         let mut projected_columns = projected_columns;
+
+        // Add indirection column to projection
         projected_columns.push(1);
 
-        match self.select_by_rid(rid, &projected_columns) {
-            Ok(row_vec) => {
-                return Ok(vec!(PyRecord::new(rid, search_key, row_vec)));
-            },
-            Err(db_err) => {
-                // error not yet handled.
-                panic!("Couldn't select_by_rid.")
+        for rid in rids {
+            match self.select_by_rid(rid, &projected_columns) {
+                Ok(row_vec) => {
+                    results.push(PyRecord::new(rid, search_key, row_vec));
+                },
+                Err(db_err) => {
+                    // error not yet handled.
+                    panic!("Couldn't select.")
+                }
             }
         }
+
+        Ok(results)
     }
 
     pub fn sum(&self, start_range: i64, end_range: i64, column_index: usize) -> PyResult<i64> {
