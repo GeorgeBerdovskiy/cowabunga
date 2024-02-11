@@ -1,3 +1,4 @@
+#[derive(Debug)]
 pub enum DatabaseError {
     // Offset is out of bounds.
     OffsetOOB,
