@@ -552,47 +552,14 @@ impl Table {
 
         Ok(sum)
     }
-}
 
-impl Table {
-    fn select_by_rid(&self, rid: RID, projection: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
-        let base_address = self.page_directory[&rid];
-
-        // First, get the base record
-        match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, projection) {
-            Ok(base_columns) => {
-                // Check if we have a most recent tail record
-                if base_columns[base_columns.len() - 1].is_none() {
-                    // There is no record more recent than this one! Return it
-                    return Ok(base_columns.into_iter().take(projection.len() - 2).collect());
-                }
-
-                // We DO have a most recent tail record - let's find it!
-                let tail_rid = base_columns[base_columns.len() - 1].unwrap();
-                let tail_address = self.page_directory[&(tail_rid as usize)];
-
-                match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, projection) {
-                    Ok(tail_columns) => return Ok(tail_columns.into_iter().take(projection.len() - 2).collect()),
-                    Err(_) => {
-                        // Do nothing for now
-                    }
-                }
-            },
-
-            Err(_) => {
-                // Do nothing for now
-            }
-        }
-
-        // if the above failed, just return empty Vec.
-        Ok(vec![])
-    }
     pub fn select_version(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<i8>, relative_version:i64) -> PyResult<Vec<PyRecord>> {
         let rid = self.lid_to_rid[&search_key];
 		let base_address = self.page_directory[&rid];
         let mut version = 0;
 
-        match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset) {
+        // TODO - Use `projected_columns` instead of a vector of all ones here AND below in the call to `read_tail_record`
+        match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, &vec![1; self.num_columns + NUM_METADATA_COLS]) {
 			Ok(base_columns) => {
 				// Check if we have a most recent tail record
 				if base_columns[base_columns.len() - 1].is_none() {
@@ -617,7 +584,7 @@ impl Table {
 
                     let tail_address = self.page_directory[&tail_rid];
                     
-                    match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset) {
+                    match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &vec![1; self.num_columns + NUM_METADATA_COLS]) {
                         Ok(tail_columns) => {
                             // record = tail_columns;
                             tail_rid = tail_columns[tail_columns.len() - 1].unwrap() as usize;
@@ -641,5 +608,45 @@ impl Table {
             }
             
         }
+    }
+}
+
+impl Table {
+    fn select_by_rid(&self, rid: RID, projection: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
+        let base_address = self.page_directory[&rid];
+
+        // First, get the base record
+        match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, projection) {
+            Ok(base_columns) => {
+                // Check if we have a most recent tail record
+                if base_columns[base_columns.len() - 1].is_none() {
+                    // There is no record more recent than this one! Return it
+                    println!("[DEBUG] Returning {:?}", base_columns);
+                    let length = base_columns.len() - 1;
+                    return Ok(base_columns.into_iter().take(length).collect());
+                }
+
+                // We DO have a most recent tail record - let's find it!
+                let tail_rid = base_columns[base_columns.len() - 1].unwrap();
+                let tail_address = self.page_directory[&(tail_rid as usize)];
+
+                match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, projection) {
+                    Ok(tail_columns) => {
+                        let length = tail_columns.len() - 1;
+                        return Ok(tail_columns.into_iter().take(length).collect())
+                    },
+                    Err(_) => {
+                        // Do nothing for now
+                    }
+                }
+            },
+
+            Err(_) => {
+                // Do nothing for now
+            }
+        }
+
+        // if the above failed, just return empty Vec.
+        Ok(vec![])
     }
 }
