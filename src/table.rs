@@ -587,4 +587,59 @@ impl Table {
         // if the above failed, just return empty Vec.
         Ok(vec![])
     }
+    pub fn select_version(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<i8>, relative_version:i64) -> PyResult<Vec<PyRecord>> {
+        let rid = self.lid_to_rid[&search_key];
+		let base_address = self.page_directory[&rid];
+        let mut version = 0;
+
+        match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset) {
+			Ok(base_columns) => {
+				// Check if we have a most recent tail record
+				if base_columns[base_columns.len() - 1].is_none() {
+					// There is no record more recent than this one! Return it
+
+					// TODO - See if there is a more "efficient" way of doing this, because I'm pretty sure `into_iter` isn't cheap
+                    // TODO: is this the correct rid to use?
+
+                    let ret_rec = PyRecord::new(rid, search_key, base_columns.into_iter().take(self.num_columns).collect());
+					return Ok(vec![ret_rec]);
+				}
+				// We DO have a most recent tail record - let's find it!
+                let mut tail_rid = base_columns[base_columns.len() - 1].unwrap() as usize;
+                //let mut record = base_columns;
+                let mut ret_rec = PyRecord::new(rid, search_key, base_columns.clone().into_iter().take(self.num_columns).collect());
+
+                while version >= relative_version {
+                    if tail_rid == rid {
+                        ret_rec = PyRecord::new(rid, search_key, base_columns.into_iter().take(self.num_columns).collect());
+                        break;
+                    }
+
+                    let tail_address = self.page_directory[&tail_rid];
+                    
+                    match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset) {
+                        Ok(tail_columns) => {
+                            // record = tail_columns;
+                            tail_rid = tail_columns[tail_columns.len() - 1].unwrap() as usize;
+                            ret_rec = PyRecord::new(tail_rid, search_key, tail_columns.into_iter().take(self.num_columns).collect());
+                        },
+                        Err(_) => {
+                            panic!("Error looping through tail rids for select_version");
+                        }
+                    }
+
+                    version -= 1;
+
+				}
+                //ret_rec = PyRecord::new(rid, search_key, record.into_iter().take(self.num_columns).collect());
+                Ok(vec![ret_rec])
+			},
+            Err(_) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("Error in select_version"),
+                ));
+            }
+            
+        }
+    }
 }
