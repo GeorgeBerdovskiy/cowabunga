@@ -22,7 +22,7 @@ query.update(90211, *[None, 100, 100, 100, None])
 query.update(90211, *[None, 101, 100, 100, None])
 query.update(90211, *[None, 101, 102, 100, None])
 query.update(90211, *[None, 101, 103, 100, None])
-
+print("--- NOW SWITXHING ---")
 query.update(90210, *[None, 100, 100, 100, 300])
 query.update(90210, *[None, 101, 100, 100, None])
 query.update(90210, *[None, 101, 102, 100, None])
@@ -50,4 +50,46 @@ for result in query.select_version(300, 4, [0, 1, 1, 1, 1], -4):
 
 print("VERSION -5 (STILL BASE)...")
 for result in query.select_version(300, 4, [0, 1, 1, 1, 1], -5):
+    print(result.columns)
+
+print("--- (300, 4, [1, 1, 1, 1, 1]) ---")
+results = query.select(300, 4, [1, 1, 1, 1, 1])
+for result in results:
+    print(f"- {result.columns}")
+
+print("--- (100, 3, [1, 1, 1, 1, 1]) ---")
+results = query.select(100, 3, [1, 1, 1, 1, 1])
+for result in results:
+    print(f"- {result.columns}")
+
+print("--- (103, 2, [1, 1, 1, 1, 1]) ---")
+results = query.select(103, 2, [1, 1, 1, 1, 1])
+for result in results:
+    print(f"- {result.columns}")
+
+print("--- (101, 1, [1, 1, 1, 1, 1]) ---")
+results = query.select(101, 1, [1, 1, 1, 1, 1])
+for result in results:
+    print(f"- {result.columns}")
+
+print("--- (90210, 0, [1, 1, 1, 1, 1]) ---")
+results = query.select(90210, 0, [1, 1, 1, 1, 1])
+for result in results:
+    print(f"- {result.columns}")
+
+print("--- (90211, 0, [1, 1, 1, 1, 1]) ---")
+results = query.select(90210, 0, [1, 1, 1, 1, 1])
+for result in results:
+    print(f"- {result.columns}")
+
+print("---- DELETE ----")
+query.delete(90211)
+print(query.select(90211, 0, [1, 1, 1, 1, 1]))
+
+for result in query.select(103, 2, [1, 1, 1 ,1 ,1]):
+    print(result.columns)
+
+query.delete(90210)
+
+for result in query.select(103, 2, [1, 1, 1 ,1 ,1]):
     print(result.columns)
