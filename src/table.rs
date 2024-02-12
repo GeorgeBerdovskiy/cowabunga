@@ -666,4 +666,19 @@ impl Table {
         // if the above failed, just return empty Vec.
         Ok(vec![])
     }
+
+    pub fn delete(&mut self, primary_key: i64) -> PyResult<()> {
+        // First, we need to get the RID corresponding to the base record with this primary key
+        let base_rid = self.indexer.locate_range(primary_key, primary_key, self.key_column);
+
+        if base_rid.len() == 0 {
+            // Doesn't exist or has already been deleted... not an error because the behavior matches what we expect
+            return Ok(());
+        }
+
+        let base_rid = base_rid[0];
+        let base_address
+
+        Ok(())
+    }
 }
