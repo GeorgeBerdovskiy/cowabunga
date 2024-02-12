@@ -268,7 +268,11 @@ pub struct Table {
     buffer_pool_manager: Arc<Mutex<BufferPool>>,
 
     /// B-Tree indexes on all columns (except metadata).
-    indexer: Indexer
+    indexer: Indexer,
+
+    /// List of "dead" RIDs... in other words, RIDs belonging to deleted records. This
+    /// list tells the merge operation what addresses may be deallocated
+    dead_rids: Vec<RID>
 }
 
 /// Represents the indexer of a table.
@@ -321,6 +325,8 @@ impl Indexer {
     /// Update the index of a column given a RID, the original value, and the new value. This will delete
     /// (original, RID) from the corresponding b-tree and add (update, RID) to the b-tree.
     pub fn update_column_index(&mut self, original: i64, update: i64, column: usize, base_rid: RID) {
+        println!("\n[DEBUG] Removing ({:?}, {:?}) and adding ({:?}, {:?}) to the indexer @ column {:?}.", original, base_rid, update, base_rid, column);
+
         // Delete the old pair
         self.b_trees[column].get_mut(&original).unwrap().remove(&base_rid);
 
@@ -338,6 +344,23 @@ impl Indexer {
         }
 
         result
+    }
+
+    pub fn remove_from_index(&mut self, columns: Vec<Option<i64>>, rid: RID) {
+        println!("DELETING {:?} FROM INDEX...", columns);
+
+        for (column_value, tree) in columns.iter().zip(self.b_trees.iter_mut()) {
+            if column_value.is_some() {
+                match tree.get_mut(&column_value.unwrap()) {
+                    Some(map) => {
+                        println!(" [DEBUG] Deleting RID. ({:?}, {:?}) doesn't exist anymore", column_value, rid);
+                        map.remove(&rid);
+                        println!("{:?}", map);
+                    },
+                    None => continue
+                };
+            }
+        }
     }
 }
 
@@ -363,7 +386,8 @@ impl Table {
             next_page_range: 0,
             buffer_pool_manager,
 
-            indexer: Indexer::new(num_columns)
+            indexer: Indexer::new(num_columns),
+            dead_rids: vec![]
         }
     }
 
@@ -447,6 +471,8 @@ impl Table {
                     match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &vec![1; self.num_columns + NUM_METADATA_COLS]) {
                         Ok(tail_columns) => {
                             // We've got the tail columns - let's combine them with the requested updates
+                            let mut i = 0;
+
                             for (update, (original, target)) in columns.iter().zip(tail_columns.iter().zip(cumulative_columns.iter_mut())) {
                                 if update.is_none() {
                                     // This column isn't being updated, so use the original value
@@ -454,7 +480,11 @@ impl Table {
                                 } else {
                                     // This column is being updated, so use the updated value
                                     *target = *update;
+
+                                    self.indexer.update_column_index(original.unwrap(), update.unwrap(), i, base_rid);
                                 }
+
+                                i += 1;
                             }
                         },
 
@@ -469,7 +499,6 @@ impl Table {
                 } else {
                     // TODO - Fix this (mixing indexes with iterators is probably not a good idea)
                     let mut i = 0;
-
                     // This is our first update, so columns that aren't updated should come from `base_columns`
                     for (update, (original, target)) in columns.iter().zip(base_columns.iter().zip(cumulative_columns.iter_mut())) {
                         if update.is_none() {
@@ -625,6 +654,76 @@ impl Table {
         }
 
         Ok(results)
+    }
+
+    pub fn delete(&mut self, primary_key: i64) -> PyResult<()> {
+        // First, we need to get the RID corresponding to the base record with this primary key
+        let base_rid = self.indexer.locate_range(primary_key, primary_key, self.key_column);
+
+        if base_rid.len() == 0 {
+            // Doesn't exist or has already been deleted... not an error because the behavior matches what we expect
+            return Ok(());
+        }
+
+        let base_rid = base_rid[0];
+        let base_address = self.page_directory[&base_rid];
+        let projection = vec![1; self.num_columns + NUM_METADATA_COLS];
+
+        match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, &projection) {
+            Ok(base_columns) => {
+                // TODO - See if there's a way to do this that doesn't involve `into_iter`, which may not be cheap
+                // TODO - Also please try to get rid of the `clone` here
+                let base_column_len = base_columns.len();
+                self.indexer.remove_from_index(base_columns.clone().into_iter().take(base_column_len - 1).collect(), base_rid);
+                self.dead_rids.push(base_rid);
+
+                // Now that we've taken care of the base RID, let's also remove all the tail records
+                // This means we need to (1) remove their columns from the index, and (2) add their RIDs
+                // to the list of dead RIDs to be deallocated during merging
+                let tail_rid = base_columns[base_column_len - 1];
+
+                if tail_rid.is_none() {
+                    // There are no tail records - we're done
+                    return Ok(())
+                }
+
+                // Otherwise, there are tail records and we need to traverse all of them
+                let mut tail_rid = tail_rid.unwrap();
+                let mut tail_address = self.page_directory[&(tail_rid as usize)];
+
+                loop {
+                    match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &projection) {
+                        Ok(tail_columns) => {
+                            // TODO - See if there's a way to do this that doesn't involve `into_iter`, which may not be cheap
+                            // ... probably replace this with a slice
+                            self.dead_rids.push(tail_rid as usize);
+
+                            let prev_tail_rid = tail_columns[tail_columns.len() - 1].unwrap();
+                            let tail_columns_len = tail_columns.len();
+                            self.indexer.remove_from_index(tail_columns.into_iter().take(tail_columns_len - 1).collect(), base_rid);
+
+                            if prev_tail_rid == base_rid as i64 {
+                                break;
+                            }
+
+                            tail_rid = prev_tail_rid;
+                            tail_address = self.page_directory[&(tail_rid as usize)];
+                        },
+
+                        Err(_) => {
+                            break;
+                        }
+                    }
+                }
+            },
+
+            Err(_) => {
+                // It doesn't exist or something... that's fine!
+                return Ok(());
+            }
+        }
+
+        Ok(())
     }
 }
 
