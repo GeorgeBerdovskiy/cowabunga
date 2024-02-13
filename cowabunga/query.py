@@ -1,5 +1,5 @@
-from lstore.table import Table
-from lstore.index import Index
+from cowabunga.table import Table
+from cowabunga.index import Index
 
 from cowabunga_rs import table_module, buffer_pool_module, record_type_module
 

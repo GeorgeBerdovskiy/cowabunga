@@ -3,8 +3,8 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from lstore.db import Database
-from lstore.query import Query
+from cowabunga.db import Database
+from cowabunga.query import Query
 from random import choice
 
 # Define "constants"
@@ -36,8 +36,8 @@ if not os.path.exists("tests/generated_scripts"):
     os.makedirs("tests/generated_scripts")
 
 fp = open("tests/generated_scripts/correctness.log.py", "w")
-fp.write(f"""from lstore.db import Database
-from lstore.query import Query
+fp.write(f"""from cowabunga.db import Database
+from cowabunga.query import Query
 
 from cowabunga_rs import table_module, buffer_pool_module
 from time import process_time

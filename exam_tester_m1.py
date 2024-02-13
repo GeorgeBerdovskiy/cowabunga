@@ -1,5 +1,5 @@
-from lstore.db import Database
-from lstore.query import Query
+from cowabunga.db import Database
+from cowabunga.query import Query
 
 from random import choice, randint, sample, seed
 
