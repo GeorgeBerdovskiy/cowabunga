@@ -97,8 +97,16 @@ for q in range(NUM_INSERTIONS):
         updates[primary_key_index] = primary_key
 
         # Update record and write to script
-        query.update(primary_key, *updates)
         write_script(f"query.update({primary_key}, *{updates})")
+
+        try:
+            query.update(primary_key, *updates)
+        except ValueError:
+            if record[primary_key_index] in record_mapping:
+                print("[ERROR] Failed to update because primary key hasn't already been used, but that's not true.")
+                exit(1)
+            else:
+                continue
 
         totals_index = record_mapping[primary_key]
         i = 0

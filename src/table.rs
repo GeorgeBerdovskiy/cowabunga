@@ -258,9 +258,6 @@ pub struct Table {
     /// Page directory - maps from RIDs to base record addresses.
     page_directory: HashMap<RID, Address>,
 
-    /// Maps LIDs to RIDs.
-    lid_to_rid: HashMap<LID, RID>,
-
     /// Index of the next available page range.
     next_page_range: usize,
 
@@ -375,7 +372,6 @@ impl Table {
             // The columns are _ | _ | ... | INDIRECTION
             page_ranges: vec![PageRange::new(num_columns + NUM_METADATA_COLS, buffer_pool_manager.clone())],
             page_directory: HashMap::new(),
-            lid_to_rid: HashMap::new(),
             next_page_range: 0,
             buffer_pool_manager,
 
@@ -407,9 +403,6 @@ impl Table {
 
         match self.page_ranges[self.next_page_range].insert_base(&columns_wrapped) {
             Ok((page, offset)) => {
-                // Add the new LID to RID mapping
-                self.lid_to_rid.insert(columns[self.key_column], self.next_rid);
-
                 // Add the new RID to physical address mapping
                 self.page_directory.insert(self.next_rid, Address::new(self.next_page_range, page, offset));
                 
@@ -440,14 +433,15 @@ impl Table {
         }
 
         let key_value = key;
+        let matching_rids = self.indexer.locate_range(key_value, key_value, self.key_column);
 
-        if self.lid_to_rid.get(&key_value).is_none() {
+        if matching_rids.len() == 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 format!("Record with identifier {} doesn't exist.", key_value),
             ));
         }
 
-        let base_rid = self.lid_to_rid[&key_value];
+        let base_rid = matching_rids[0];
         let base_address = self.page_directory[&base_rid];
 
         // Since we're using the cumulative update scheme, we need to grab the remaining values first

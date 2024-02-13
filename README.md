@@ -1,3 +1,7 @@
+<p align="center">
+  <img width="350px" src="README/CowabungaLogo.png">
+</p>
+
 # CowabungaDB
 
 ## Setup
