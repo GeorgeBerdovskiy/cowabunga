@@ -1,31 +1,41 @@
+import sys, os
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 from lstore.db import Database
 from lstore.query import Query
-
-from cowabunga_rs import table_module, buffer_pool_module
-from time import process_time
-from random import choice, randrange
+from random import choice
 
 # Define "constants"
 NUM_COLUMNS = 2
-NUM_INSERTIONS = 1000000
+NUM_INSERTIONS = 100000
 VALUE_MIN = -1000
 VALUE_MAX = 1000
+WRITE_SCRIPT = False
 
+# This will be used to store values
 totals = [ [] for _ in range(NUM_COLUMNS) ]
+
+# This maps primary keys to their columns in `totals`
 record_mapping = {}
+
+# This contains the primary keys
 key = []
 
+# Randomly select which column is the primary key
 primary_key_index = choice(range(NUM_COLUMNS))
 
+# Spin up the database and create a table
 db = Database()
 grades_table = db.create_table('Grades', NUM_COLUMNS, primary_key_index)
 query = Query(grades_table)
 
-f = open("correctness.log", "w")
-fp = open("correctness.log.py", "w")
+# Open the script to be generated and write prologue
+if not os.path.exists("tests/generated_scripts"):
+    os.makedirs("tests/generated_scripts")
 
-f.write(f"TABLE: Grades\nNUM COLUMNS: {NUM_COLUMNS}\nPRIM KEY IND: {primary_key_index}\n---------\n")
-
+fp = open("tests/generated_scripts/correctness.log.py", "w")
 fp.write(f"""from lstore.db import Database
 from lstore.query import Query
 
@@ -39,15 +49,21 @@ query = Query(grades_table)
 
 """)
 
-for _ in range(NUM_INSERTIONS):
+# Write to script _if_ configuration specifies that we should
+def write_script(input: str):
+    if not WRITE_SCRIPT:
+        return
+
+    fp.write(f"{input}\n")
+
+for q in range(NUM_INSERTIONS):
+    print(f"[INFO] QUERY {q + 1} / {NUM_INSERTIONS}")
     query_choice = choice(range(7))
 
     if query_choice == 0:
-        # Insert a record
+        # Insert a record and write to script
         record = [choice(range(VALUE_MIN, VALUE_MAX)) for _ in range(NUM_COLUMNS)]
-        
-        f.write(f"INSERT {record[primary_key_index]} {record}\n")
-        fp.write(f"query.insert(*{record})\n")
+        write_script(f"query.insert(*{record})")
 
         # If some other unexpected error occurs, we'll see it since it isn't handled
         try:
@@ -80,10 +96,9 @@ for _ in range(NUM_INSERTIONS):
         updates = [choice([None, choice(range(VALUE_MIN, VALUE_MAX))]) for _ in range(NUM_COLUMNS)]
         updates[primary_key_index] = primary_key
 
+        # Update record and write to script
         query.update(primary_key, *updates)
-        
-        f.write(f"UPDATE {primary_key} {updates}\n")
-        fp.write(f"query.update({primary_key}, *{updates})\n")
+        write_script(f"query.update({primary_key}, *{updates})")
 
         totals_index = record_mapping[primary_key]
         i = 0
@@ -98,13 +113,13 @@ for _ in range(NUM_INSERTIONS):
         if len(keys) == 0:
             print("[WARNING] Couldn't select because no insertions. Moving on...")
             continue
-    
+
         primary_key = choice(keys)
         projection = [choice([0, 1]) for _ in range(NUM_COLUMNS)]
-        result = query.select(primary_key, primary_key_index, projection)
 
-        f.write(f"SELECT PRIM {primary_key} {projection}\n")
-        fp.write(f"query.select({primary_key}, {primary_key_index}, {projection})\n")
+        # Select on primary key and write to script
+        result = query.select(primary_key, primary_key_index, projection)
+        write_script(f"query.select({primary_key}, {primary_key_index}, {projection})")
 
         if len(result) != 1:
             print(f"[ERROR] Expected one result, got {len(result)}.")
@@ -122,18 +137,13 @@ for _ in range(NUM_INSERTIONS):
                 projected_columns.append(all_columns[i])
         
         if len(projected_columns) != len(result[0].columns):
-            print(f"[ERROR] Expected select to return {projected_columns}, found {result[0].columns}.")
+            print(f"[ERROR] Expected SELECT to return {projected_columns}, found {result[0].columns}.")
             exit(1)
 
         for i in range(len(projected_columns)):
             if projected_columns[i] != result[0].columns[i]:
-                print(f"[ERROR] Expected select to return {projected_columns}, found {result[0].columns}")
-                
-                fp.write(f"# [ERROR] Expected select to return {projected_columns}, got {result[0].columns} instead")
-
-                print(record_mapping)
-                print(totals)
-                
+                print(f"[ERROR] Expected SELECT to return {projected_columns}, found {result[0].columns}")
+                write_script(f"# [ERROR] Expected SELECT to return {projected_columns}, got {result[0].columns} instead")
                 exit(1)
     elif query_choice == 3:
         # Perform a select on another key (may return several records)
@@ -151,9 +161,9 @@ for _ in range(NUM_INSERTIONS):
         projection = [choice([0, 1]) for _ in range(NUM_COLUMNS)]
         projection[primary_key_index] = 1
 
+        # Select on the search key and write to script
         results = query.select(search_key, search_key_index, projection)
-        f.write(f"SELECT ANY {search_key} @ {search_key_index} {projection}\n")
-        fp.write(f"query.select({search_key}, {search_key_index}, {projection})\n")
+        write_script(f"query.select({search_key}, {search_key_index}, {projection})")
 
         # We need "reconstruct" the records we expect from `totals`
         # Find every entry in the totals column that has the search key
@@ -192,13 +202,13 @@ for _ in range(NUM_INSERTIONS):
 
         for prim_key in returned_prim_keys:
             if prim_key not in matches:
-                print(f"[ERROR] Select returned record w/primary key {prim_key}, but it shouldn't have. Returned primary keys are {returned_prim_keys} and the expected ones are {matches}")
-                fp.write(f"# [ERROR] Last select returned primary key {prim_key} but it shouldn't have.")
+                print(f"[ERROR] SELECT returned record with primary key {prim_key}, but it shouldn't have. Returned primary keys are {returned_prim_keys} and expected keys are {matches}")
+                write_script(f"# [ERROR] SELECT returned primary key {prim_key} but it shouldn't have.")
                 exit(1)
     elif query_choice == 4:
         # Perform a sum
         if len(list(record_mapping.keys())) == 0:
-            print("[WARNING] Couldn't select because no insertions. Moving on...")
+            print("[WARNING] Couldn't sum because no insertions. Moving on...")
             continue
             
         search_key_low = choice(range(VALUE_MIN, VALUE_MAX))
@@ -206,8 +216,9 @@ for _ in range(NUM_INSERTIONS):
 
         aggregate_col_index = choice(range(NUM_COLUMNS))
 
+        # Perform sum and write to script
         result = query.sum(search_key_low, search_key_high, aggregate_col_index)
-        fp.write(f"query.sum({search_key_low}, {search_key_high}, {aggregate_col_index})\n")
+        write_script(f"query.sum({search_key_low}, {search_key_high}, {aggregate_col_index})")
 
         # First, find all the primary keys within the range
         matched_primary_keys = []
@@ -235,7 +246,7 @@ for _ in range(NUM_INSERTIONS):
         
         if result != expected_sum:
             print(f"[ERROR] Expected SUM to return {expected_sum} but got {result} instead.")
-            fp.write(f"# [ERROR] Expected SUM to return {expected_sum} but got {result} instead.")
+            write_script(f"# [ERROR] Expected SUM to return {expected_sum} but got {result} instead.")
             exit(1)
     elif query_choice == 5:
         # Perform a select on any key that ISN'T the primary key WITH VERSION
@@ -243,7 +254,7 @@ for _ in range(NUM_INSERTIONS):
         version = choice(range(-10, 1))
                 # Perform a select on another key (may return several records)
         if len(list(record_mapping.keys())) == 0:
-            print("[WARNING] Couldn't select because no insertions. Moving on...")
+            print("[WARNING] Couldn't select by version because no insertions. Moving on...")
             continue
             
         search_key = choice(range(VALUE_MIN, VALUE_MAX))
@@ -256,9 +267,9 @@ for _ in range(NUM_INSERTIONS):
         projection = [choice([0, 1]) for _ in range(NUM_COLUMNS)]
         projection[primary_key_index] = 1
 
+        # Select version and write to script
         results = query.select_version(search_key, search_key_index, projection, version)
-        f.write(f"SELECT_VERSION ANY {search_key} @ {search_key_index} {projection}\n")
-        fp.write(f"query.select_version({search_key}, {search_key_index}, {projection}, {version})\n")
+        write_script(f"query.select_version({search_key}, {search_key_index}, {projection}, {version})")
 
         # We need "reconstruct" the records we expect from `totals`
         # Find every entry in the totals column that has the search key
@@ -306,7 +317,6 @@ for _ in range(NUM_INSERTIONS):
                 print(f"[ERROR] SELECT VERSION returned {res}, but it was not expected. The expected records are...")
                 for exp in expected_records:
                     print(f"- {exp}")
-                # fp.write(f"# [ERROR] Last select version returned primary key {prim_key} but it shouldn't have.")
                 exit(1)
     elif query_choice == 6:
         # Perform DELETE
@@ -316,11 +326,13 @@ for _ in range(NUM_INSERTIONS):
         
         primary_key = choice(list(record_mapping.keys()))
 
+        # Perform delete and write to log
         query.delete(primary_key)
-        f.write(f"DELETE {primary_key}\n")
-        fp.write(f"query.delete({primary_key})\n")
+        write_script(f"query.delete({primary_key})")
 
         del record_mapping[primary_key]
 
 print(f"[INFO] Success! Ran {NUM_INSERTIONS} random queries without errors or mismatches in behavior.")
-f.close()
+
+# Close the generated script!
+fp.close()
