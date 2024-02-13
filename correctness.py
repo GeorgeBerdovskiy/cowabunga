@@ -7,9 +7,9 @@ from random import choice, randrange
 
 # Define "constants"
 NUM_COLUMNS = 2
-NUM_INSERTIONS = 10000
+NUM_INSERTIONS = 1000000
 VALUE_MIN = -1000
-VALUE_MAX = 100
+VALUE_MAX = 1000
 
 totals = [ [] for _ in range(NUM_COLUMNS) ]
 record_mapping = {}
@@ -40,12 +40,15 @@ query = Query(grades_table)
 """)
 
 for _ in range(NUM_INSERTIONS):
-    query_choice = choice(range(6))
+    query_choice = choice(range(7))
 
     if query_choice == 0:
         # Insert a record
         record = [choice(range(VALUE_MIN, VALUE_MAX)) for _ in range(NUM_COLUMNS)]
         
+        f.write(f"INSERT {record[primary_key_index]} {record}\n")
+        fp.write(f"query.insert(*{record})\n")
+
         # If some other unexpected error occurs, we'll see it since it isn't handled
         try:
             query.insert(*record)
@@ -55,9 +58,6 @@ for _ in range(NUM_INSERTIONS):
                 exit(1)
             else:
                 continue
-
-        f.write(f"INSERT {record[primary_key_index]} {record}\n")
-        fp.write(f"query.insert(*{record})\n")
 
         if record[primary_key_index] not in record_mapping:
             # New record - add it to the totals and mapping
@@ -218,6 +218,10 @@ for _ in range(NUM_INSERTIONS):
         # Now, get all the slots to sum in the `totals` dictionary
         column_indices = []
         for key in matched_primary_keys:
+            if key not in record_mapping:
+                # Entry must have been deleted - moving on
+                continue
+
             column_indices.append(record_mapping[key])
 
         # Finally, calculate the expected sum
@@ -263,14 +267,9 @@ for _ in range(NUM_INSERTIONS):
         # We need to get all the indices of records with matching fields at the
         # MOST RECENT VERSION
         for i in range(len(totals[search_key_index])):
-            # If the version is too low, set it to the lowest possible one (zero)
-            floored_version = version
-            if abs(floored_version) >= len(totals[search_key_index][i]):
-                floored_version = 0
-
-            if totals[search_key_index][i][-1] == search_key:
+            if totals[search_key_index][i][-1] == search_key and i in record_mapping.values():
                 found_indices.append(i)
-            
+
         # Now, we also need to get the values they have at the `version` version
         expected_records = [[] for _ in range(len(found_indices))]
         for i in range(NUM_COLUMNS):
@@ -293,7 +292,7 @@ for _ in range(NUM_INSERTIONS):
                     k += 1
         
         if len(expected_records) != len(results):
-            print(f"[ERROR] Expected SELECT VERSION {version} to return {len(matches)} records but got {len(results)}.")
+            print(f"[ERROR] Expected SELECT VERSION {version} to return {len(expected_records)} records but got {len(results)}.")
             exit(1)
         
         if len(expected_records) == 0:
@@ -309,6 +308,19 @@ for _ in range(NUM_INSERTIONS):
                     print(f"- {exp}")
                 # fp.write(f"# [ERROR] Last select version returned primary key {prim_key} but it shouldn't have.")
                 exit(1)
+    elif query_choice == 6:
+        # Perform DELETE
+        if len(list(record_mapping.keys())) == 0:
+            print("[WARNING] Cannot delete because no records exist. Moving on...")
+            continue
+        
+        primary_key = choice(list(record_mapping.keys()))
+
+        query.delete(primary_key)
+        f.write(f"DELETE {primary_key}\n")
+        fp.write(f"query.delete({primary_key})\n")
+
+        del record_mapping[primary_key]
 
 print(f"[INFO] Success! Ran {NUM_INSERTIONS} random queries without errors or mismatches in behavior.")
 f.close()
