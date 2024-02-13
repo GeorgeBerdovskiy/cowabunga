@@ -1,0 +1,20 @@
+from lstore.db import Database
+from lstore.query import Query
+
+from cowabunga_rs import table_module, buffer_pool_module
+from time import process_time
+from random import choice, randrange
+
+db = Database()
+grades_table = db.create_table('Grades', 5, 1)
+query = Query(grades_table)
+
+query.insert(*[3, -6, 8, -6, -2])
+query.insert(*[5, -5, 8, 2, -8])
+query.sum(-10, -2, 1)
+query.update(-5, *[-5, -5, -6, None, None])
+query.sum(-4, 0, 1)
+query.insert(*[2, 1, 2, 4, 7])
+query.select(2, 3, [1, 1, 0, 1, 1])
+print(query.sum(4, 8, 4))
+# [ERROR] Expected SUM to return 7 but got 0 instead.
