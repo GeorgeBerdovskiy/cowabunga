@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
-    name="ecs_165_database",
+    name="cowabunga_rs",
     version="0.1.0",
     author="Group",
     description="Rust database package",
@@ -14,8 +14,8 @@ setup(
     long_description_content_type="text/markdown",
     url="",
     rust_extensions=[
-        RustExtension("ecs_165_database", binding=Binding.PyO3),
+        RustExtension("cowabunga_rs", binding=Binding.PyO3),
     ],
-    packages=["ecs_165_database"],
+    packages=["cowabunga_rs"],
     zip_safe=False,
 )

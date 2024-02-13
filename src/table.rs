@@ -325,8 +325,6 @@ impl Indexer {
     /// Update the index of a column given a RID, the original value, and the new value. This will delete
     /// (original, RID) from the corresponding b-tree and add (update, RID) to the b-tree.
     pub fn update_column_index(&mut self, original: i64, update: i64, column: usize, base_rid: RID) {
-        println!("\n[DEBUG] Removing ({:?}, {:?}) and adding ({:?}, {:?}) to the indexer @ column {:?}.", original, base_rid, update, base_rid, column);
-
         // Delete the old pair
         self.b_trees[column].get_mut(&original).unwrap().remove(&base_rid);
 
@@ -338,7 +336,6 @@ impl Indexer {
     /// that range of keys
     fn locate_range(&self, start_key: i64, end_key: i64, column: usize) -> Vec<RID> {
         let mut result = Vec::new();
-
         for (&key, value) in self.b_trees[column].range((Included(&start_key), Included(&end_key))) {
             result.extend(value);
         }
@@ -347,15 +344,11 @@ impl Indexer {
     }
 
     pub fn remove_from_index(&mut self, columns: Vec<Option<i64>>, rid: RID) {
-        println!("DELETING {:?} FROM INDEX...", columns);
-
         for (column_value, tree) in columns.iter().zip(self.b_trees.iter_mut()) {
             if column_value.is_some() {
                 match tree.get_mut(&column_value.unwrap()) {
                     Some(map) => {
-                        println!(" [DEBUG] Deleting RID. ({:?}, {:?}) doesn't exist anymore", column_value, rid);
                         map.remove(&rid);
-                        println!("{:?}", map);
                     },
                     None => continue
                 };
@@ -404,7 +397,9 @@ impl Table {
             ));
         }
 
-        if self.lid_to_rid.get(&columns[self.key_column]).is_some() {
+        let matching_rids = self.indexer.locate_range(columns[self.key_column], columns[self.key_column], self.key_column);
+
+        if matching_rids.len() != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 format!("Record with identifier {} already exists.", columns[self.key_column]),
             ));
@@ -566,6 +561,8 @@ impl Table {
         Ok(results)
     }
 
+    /// Given the start and end of an (inclusive) range, find all entries with primary keys
+    /// within that range and sum the column at `column_index`.
     pub fn sum(&self, start_range: i64, end_range: i64, column_index: usize) -> PyResult<i64> {
         let rids = self.indexer.locate_range(start_range, end_range, self.key_column);
 
@@ -588,7 +585,7 @@ impl Table {
         Ok(sum)
     }
 
-    pub fn select_version(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<i8>, relative_version:i64) -> PyResult<Vec<PyRecord>> {
+    pub fn select_version(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<usize>, relative_version:i64) -> PyResult<Vec<PyRecord>> {
         let rids = self.indexer.locate_range(search_key, search_key, search_key_index);
         let mut results: Vec<PyRecord> = Vec::new();
 
@@ -602,7 +599,7 @@ impl Table {
             let mut version = 0;
 
             // TODO - Use `projected_columns` instead of a vector of all ones here AND below in the call to `read_tail_record`
-            match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, &vec![1; self.num_columns + NUM_METADATA_COLS]) {
+            match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, &projected_columns) {
                 Ok(base_columns) => {
                     // Check if we have a most recent tail record
                     if base_columns[base_columns.len() - 1].is_none() {
@@ -610,8 +607,8 @@ impl Table {
 
                         // TODO - See if there is a more "efficient" way of doing this, because I'm pretty sure `into_iter` isn't cheap
                         // TODO: is this the correct rid to use?
-
-                        results.push(PyRecord::new(rid, search_key, base_columns.into_iter().take(self.num_columns).collect()));
+                        let base_cols_len = base_columns.len();
+                        results.push(PyRecord::new(rid, search_key, base_columns.into_iter().take(base_cols_len - 1).collect()));
                         continue;
                     }
 
@@ -621,16 +618,18 @@ impl Table {
 
                     while version >= relative_version {
                         if tail_rid == rid {
-                            next_record = PyRecord::new(rid, search_key, base_columns.into_iter().take(self.num_columns).collect());
+                            let base_cols_len = base_columns.len();
+                            next_record = PyRecord::new(rid, search_key, base_columns.into_iter().take(base_cols_len - 1).collect());
                             break;
                         }
 
                         let tail_address = self.page_directory[&tail_rid];
                         
-                        match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &vec![1; self.num_columns + NUM_METADATA_COLS]) {
+                        match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &projected_columns) {
                             Ok(tail_columns) => {
                                 tail_rid = tail_columns[tail_columns.len() - 1].unwrap() as usize;
-                                next_record = PyRecord::new(tail_rid, search_key, tail_columns.into_iter().take(self.num_columns).collect());
+                                let tail_cols_len =tail_columns.len();
+                                next_record = PyRecord::new(tail_rid, search_key, tail_columns.into_iter().take(tail_cols_len - 1).collect());
                             },
 
                             Err(_) => {
@@ -671,16 +670,18 @@ impl Table {
 
         match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, &projection) {
             Ok(base_columns) => {
-                // TODO - See if there's a way to do this that doesn't involve `into_iter`, which may not be cheap
-                // TODO - Also please try to get rid of the `clone` here
-                let base_column_len = base_columns.len();
-                self.indexer.remove_from_index(base_columns.clone().into_iter().take(base_column_len - 1).collect(), base_rid);
+                // Add the base record RID to the list of dead RIDs for removal
                 self.dead_rids.push(base_rid);
+
+                // Remove the base record's values from the indexer
+                if let Some((_, elements)) = base_columns.split_last() {
+                    self.indexer.remove_from_index(elements.to_vec(), base_rid);
+                }
 
                 // Now that we've taken care of the base RID, let's also remove all the tail records
                 // This means we need to (1) remove their columns from the index, and (2) add their RIDs
                 // to the list of dead RIDs to be deallocated during merging
-                let tail_rid = base_columns[base_column_len - 1];
+                let tail_rid = base_columns[base_columns.len() - 1];
 
                 if tail_rid.is_none() {
                     // There are no tail records - we're done
@@ -694,18 +695,23 @@ impl Table {
                 loop {
                     match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &projection) {
                         Ok(tail_columns) => {
-                            // TODO - See if there's a way to do this that doesn't involve `into_iter`, which may not be cheap
-                            // ... probably replace this with a slice
+                            // Add the last tail record's RID to the list of dead RIDs
                             self.dead_rids.push(tail_rid as usize);
 
+                            // Calculate the RID of the previous tail record (or the base record)
                             let prev_tail_rid = tail_columns[tail_columns.len() - 1].unwrap();
-                            let tail_columns_len = tail_columns.len();
-                            self.indexer.remove_from_index(tail_columns.into_iter().take(tail_columns_len - 1).collect(), base_rid);
+
+                            // Drop the indirection column and remove all value - RID pairs from the indexer
+                            if let Some((_, elements)) = tail_columns.split_last() {
+                                self.indexer.remove_from_index(elements.to_vec(), base_rid);
+                            }                            
 
                             if prev_tail_rid == base_rid as i64 {
+                                // We've returned to the base record - nothing more to do here
                                 break;
                             }
 
+                            // Prepare for the next iteration of this loop
                             tail_rid = prev_tail_rid;
                             tail_address = self.page_directory[&(tail_rid as usize)];
                         },
@@ -718,7 +724,7 @@ impl Table {
             },
 
             Err(_) => {
-                // It doesn't exist or something... that's fine!
+                // It doesn't exist or another error occurred... that's fine!
                 return Ok(());
             }
         }
@@ -728,6 +734,8 @@ impl Table {
 }
 
 impl Table {
+    /// Select one record given its RID and a column projection. Note that this method
+    /// is _not_ exposed via PyO3.
     fn select_by_rid(&self, rid: RID, projection: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
         let base_address = self.page_directory[&rid];
 
@@ -737,7 +745,6 @@ impl Table {
                 // Check if we have a most recent tail record
                 if base_columns[base_columns.len() - 1].is_none() {
                     // There is no record more recent than this one! Return it
-                    println!("[DEBUG] Returning {:?}", base_columns);
                     let length = base_columns.len() - 1;
                     return Ok(base_columns.into_iter().take(length).collect());
                 }
@@ -762,7 +769,7 @@ impl Table {
             }
         }
 
-        // if the above failed, just return empty Vec.
+        // Silently fail by returning an empty vector - replace with an error in the future
         Ok(vec![])
     }
 }

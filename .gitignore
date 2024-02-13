@@ -1,6 +1,10 @@
 .DS_Store
 .*.swp
 
+# Generated Python scripts
+./tests/generated_scripts
+*.log.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

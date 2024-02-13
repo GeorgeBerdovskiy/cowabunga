@@ -1,5 +1,5 @@
-from lstore.table import Table
-from lstore.index import Index
+from cowabunga.table import Table
+from cowabunga.index import Index
 
 from cowabunga_rs import table_module, buffer_pool_module, record_type_module
 
@@ -81,7 +81,7 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum(self, start_range, end_range, aggregate_column_index):
-        pass
+        return self.table.sum(start_range, end_range, aggregate_column_index)
 
     
     """

@@ -1,5 +1,5 @@
-from lstore.table import Table, Record
-from lstore.index import Index
+from cowabunga.table import Table, Record
+from cowabunga.index import Index
 
 class TransactionWorker:
 
