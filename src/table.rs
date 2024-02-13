@@ -325,7 +325,7 @@ impl Indexer {
     /// Update the index of a column given a RID, the original value, and the new value. This will delete
     /// (original, RID) from the corresponding b-tree and add (update, RID) to the b-tree.
     pub fn update_column_index(&mut self, original: i64, update: i64, column: usize, base_rid: RID) {
-        println!("\n[DEBUG] Removing ({:?}, {:?}) and adding ({:?}, {:?}) to the indexer @ column {:?}.", original, base_rid, update, base_rid, column);
+        //println!("\n[DEBUG] Removing ({:?}, {:?}) and adding ({:?}, {:?}) to the indexer @ column {:?}.", original, base_rid, update, base_rid, column);
 
         // Delete the old pair
         self.b_trees[column].get_mut(&original).unwrap().remove(&base_rid);
@@ -353,9 +353,9 @@ impl Indexer {
             if column_value.is_some() {
                 match tree.get_mut(&column_value.unwrap()) {
                     Some(map) => {
-                        println!(" [DEBUG] Deleting RID. ({:?}, {:?}) doesn't exist anymore", column_value, rid);
+                        //println!(" [DEBUG] Deleting RID. ({:?}, {:?}) doesn't exist anymore", column_value, rid);
                         map.remove(&rid);
-                        println!("{:?}", map);
+                        //println!("{:?}", map);
                     },
                     None => continue
                 };
@@ -737,7 +737,7 @@ impl Table {
                 // Check if we have a most recent tail record
                 if base_columns[base_columns.len() - 1].is_none() {
                     // There is no record more recent than this one! Return it
-                    println!("[DEBUG] Returning {:?}", base_columns);
+                    //println!("[DEBUG] Returning {:?}", base_columns);
                     let length = base_columns.len() - 1;
                     return Ok(base_columns.into_iter().take(length).collect());
                 }
