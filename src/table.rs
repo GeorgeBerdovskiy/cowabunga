@@ -600,7 +600,8 @@ impl Table {
             // Grab the value of the specified column in the record identified by `rid`.
             // If it returns `Some(value)`, add the value to the sum. Otherwise, add zero (this
             // technically shouldn't happen).
-            sum += match self.select_by_rid(rid, &projection).unwrap()[0] {
+
+            sum += match self.select_by_rid_version(rid, &projection, relative_version).unwrap()[0] {
                 Some(val) => val,
                 None => 0
             };
@@ -636,83 +637,74 @@ impl Table {
                         results.push(PyRecord::new(rid, search_key, base_columns.into_iter().take(base_cols_len - 1).collect()));
                         continue;
                     }
-                    // // We DO have a most recent tail record - let's find it!
-                    // let mut tail_rid = base_columns[base_columns.len() - 1].unwrap() as usize;
-                    // let mut next_record = PyRecord::new(rid, search_key, base_columns.clone().into_iter().take(self.num_columns).collect());
-
-                    // while version >= relative_version {
-                    //     if tail_rid == rid {
-                    //         let base_cols_len = base_columns.len();
-                    //         next_record = PyRecord::new(rid, search_key, base_columns.into_iter().take(base_cols_len - 1).collect());
-                    //         break;
-                    //     }
-
-                    //     let tail_address = self.page_directory[&tail_rid];
-                        
-                    //     match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &projected_columns) {
-                    //         Ok(tail_columns) => {
-                    //             tail_rid = tail_columns[tail_columns.len() - 1].unwrap() as usize;
-                    //             let tail_cols_len =tail_columns.len();
-                    //             next_record = PyRecord::new(tail_rid, search_key, tail_columns.into_iter().take(tail_cols_len - 1).collect());
-                    //         },
-
-                    //         Err(_) => {
-                    //             panic!("Error looping through tail rids for select_version");
-                    //         }
-                    //     }
-
-                    //     version -= 1;
-
-                    // }
-
-                    // results.push(next_record);
-                    
                     // We DO have a most recent tail record - let's find it!
-                    let tail_rid = base_columns[base_columns.len() - 1].unwrap() as usize;
-                    let version_result = self.get_version(rid, tail_rid, relative_version);
-                    let relative_rid = version_result.0;
-                    let base = version_result.1;
-                    let relative_address = self.page_directory[&relative_rid];
-                    let mut next_record = PyRecord::new(rid, search_key, base_columns.into_iter().take(base_cols_len - 1).collect());
-                    println!("[DEBUG] relative_rid is {:?}", version_result);
+                    let mut tail_rid = base_columns[base_columns.len() - 1].unwrap() as usize;
+                    let mut next_record = PyRecord::new(rid, search_key, base_columns.clone().into_iter().take(self.num_columns).collect());
 
-                    if !base {
-                        match self.page_ranges[relative_address.range].read_tail_record(relative_address.page, relative_address.offset, &projected_columns) {
+                    while version >= relative_version {
+                        if tail_rid == rid {
+                            let base_cols_len = base_columns.len();
+                            next_record = PyRecord::new(rid, search_key, base_columns.into_iter().take(base_cols_len - 1).collect());
+                            break;
+                        }
+
+                        let tail_address = self.page_directory[&tail_rid];
+                        
+                        match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &projected_columns) {
                             Ok(tail_columns) => {
-                                let tail_columns_len = tail_columns.len();
-                                next_record = PyRecord::new(rid, search_key, tail_columns.into_iter().take(tail_columns_len - 1).collect());
-                                println!("{:?}", next_record.columns);
+                                tail_rid = tail_columns[tail_columns.len() - 1].unwrap() as usize;
+                                let tail_cols_len =tail_columns.len();
+                                next_record = PyRecord::new(tail_rid, search_key, tail_columns.into_iter().take(tail_cols_len - 1).collect());
                             },
+
                             Err(_) => {
                                 panic!("Error looping through tail rids for select_version");
                             }
                         }
+
+                        version -= 1;
                     }
+
                     results.push(next_record);
+                    
+                    // We DO have a most recent tail record - let's find it!
+                    // let tail_rid = base_columns[base_columns.len() - 1].unwrap() as usize;
+                    // let relative_rid = self.get_version(rid, tail_rid, relative_version);
+                    // let relative_address = self.page_directory[&relative_rid];
+                    // let mut next_record = PyRecord::new(rid, search_key, base_columns.into_iter().take(base_cols_len - 1).collect());
+
+                    // if relative_rid != rid {
+                    //     match self.page_ranges[relative_address.range].read_tail_record(relative_address.page, relative_address.offset, &projected_columns) {
+                    //         Ok(tail_columns) => {
+                    //             let tail_columns_len = tail_columns.len();
+                    //             next_record = PyRecord::new(rid, search_key, tail_columns.into_iter().take(tail_columns_len - 1).collect());
+                    //         },
+                    //         Err(_) => {
+                    //             panic!("Error looping through tail rids for select_version");
+                    //         }
+                    //     }
+                    // }
+                    // results.push(next_record);
                 },
                 Err(_) => {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                         format!("Error in select_version, indexing"),
                     ));
                 }
-                
             }
         }
                     
         Ok(results)
     }
     
-    pub fn get_version(&mut self, rid: RID, mut tail_rid: RID, relative_version: i64) -> (RID, bool) {
+    pub fn get_version(&mut self, rid: RID, mut tail_rid: RID, relative_version: i64) -> RID {
         let mut version = 0;
-        let mut base = false;
         let mut projected_columns: Vec<usize> = vec![0; self.num_columns];
         projected_columns.push(1);
 
 
         while version >= relative_version {
-            println!("[DEBUG] {}", tail_rid);
             if tail_rid == rid {
-                base = true;
                 break;
             }
             let tail_address = self.page_directory[&tail_rid];
@@ -729,7 +721,7 @@ impl Table {
             
             version -= 1;
         }
-        (tail_rid, base)
+        tail_rid
     }
 
 
@@ -840,6 +832,53 @@ impl Table {
                         // Do nothing for now
                     }
                 }
+            },
+
+            Err(_) => {
+                // Do nothing for now
+            }
+        }
+
+        // Silently fail by returning an empty vector - replace with an error in the future
+        Ok(vec![])
+    }
+    fn select_by_rid_version(&self, rid: RID, projection: &Vec<usize>, relative_version: i64) -> Result<Vec<Option<i64>>, DatabaseError> {
+        let base_address = self.page_directory[&rid];
+        let mut version = 0;
+
+        // First, get the base record
+        match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, projection) {
+            Ok(base_columns) => {
+                // Check if we have a most recent tail record
+                if base_columns[base_columns.len() - 1].is_none() {
+                    // There is no record more recent than this one! Return it
+                    let length = base_columns.len() - 1;
+                    return Ok(base_columns.into_iter().take(length).collect());
+                }
+
+                // We DO have a most recent tail record - let's find it!
+                let mut tail_rid = base_columns[base_columns.len() - 1].unwrap() as usize;
+
+                while version >= relative_version {
+                    if tail_rid == rid {
+                        let base_cols_len = base_columns.len();
+                        return Ok(base_columns.into_iter().take(base_cols_len).collect());
+                    }
+
+                    let tail_address = self.page_directory[&tail_rid];
+                    
+                    match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, projection) {
+                        Ok(tail_columns) => {
+                            tail_rid = tail_columns[tail_columns.len() - 1].unwrap() as usize;
+                        },
+
+                        Err(_) => {
+                            panic!("Error looping through tail rids for select_version");
+                        }
+                    }
+                    version -= 1;
+                }
+                return self.select_by_rid(tail_rid, projection)
             },
 
             Err(_) => {

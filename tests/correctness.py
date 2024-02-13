@@ -9,7 +9,7 @@ from random import choice
 
 # Define "constants"
 NUM_COLUMNS = 2
-NUM_INSERTIONS = 10000
+NUM_INSERTIONS = 20000
 VALUE_MIN = -1000
 VALUE_MAX = 1000
 WRITE_SCRIPT = True
