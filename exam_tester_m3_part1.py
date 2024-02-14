@@ -1,7 +1,7 @@
-from cowabunga.db import Database
-from cowabunga.query import Query
-from cowabunga.transaction import Transaction
-from cowabunga.transaction_worker import TransactionWorker
+from lstore.db import Database
+from lstore.query import Query
+from lstore.transaction import Transaction
+from lstore.transaction_worker import TransactionWorker
 
 from random import choice, randint, sample, seed
 

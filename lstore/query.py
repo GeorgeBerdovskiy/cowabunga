@@ -1,5 +1,5 @@
-from cowabunga.table import Table
-from cowabunga.index import Index
+from lstore.table import Table
+from lstore.index import Index
 
 from cowabunga_rs import table_module, buffer_pool_module, record_type_module
 
@@ -33,7 +33,6 @@ class Query:
         # schema_encoding = '0' * self.table.num_columns
         col_list = list(columns)
         self.table.insert(col_list);
-
     
     """
     # Read matching record with specified search key
@@ -46,7 +45,6 @@ class Query:
     """
     def select(self, search_key, search_key_index, projected_columns_index):
         return self.table.select(search_key, search_key_index, projected_columns_index);
-
     
     """
     # Read matching record with specified search key

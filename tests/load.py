@@ -3,8 +3,8 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from cowabunga.db import Database
-from cowabunga.query import Query
+from lstore.db import Database
+from lstore.query import Query
 from time import process_time
 from random import choice
 import random
