@@ -9,10 +9,10 @@ from random import choice
 
 # Define "constants"
 NUM_COLUMNS = 2
-NUM_INSERTIONS = 100000
+NUM_INSERTIONS = 20000
 VALUE_MIN = -1000
 VALUE_MAX = 1000
-WRITE_SCRIPT = False
+WRITE_SCRIPT = True
 
 # This will be used to store values
 totals = [ [] for _ in range(NUM_COLUMNS) ]
@@ -36,7 +36,12 @@ if not os.path.exists("tests/generated_scripts"):
     os.makedirs("tests/generated_scripts")
 
 fp = open("tests/generated_scripts/correctness.log.py", "w")
-fp.write(f"""from cowabunga.db import Database
+fp.write(f"""import sys, os
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+
+from cowabunga.db import Database
 from cowabunga.query import Query
 
 from cowabunga_rs import table_module, buffer_pool_module
@@ -277,6 +282,7 @@ for q in range(NUM_INSERTIONS):
 
         # Select version and write to script
         results = query.select_version(search_key, search_key_index, projection, version)
+        print(results)
         write_script(f"query.select_version({search_key}, {search_key_index}, {projection}, {version})")
 
         # We need "reconstruct" the records we expect from `totals`

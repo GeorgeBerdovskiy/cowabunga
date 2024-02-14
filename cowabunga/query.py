@@ -59,9 +59,8 @@ class Query:
     # Assume that select will never be called on a key that doesn't exist
     """
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
-        return self.table.select_version(search_key, search_key_index, projected_columns_index, relative_version)
-
-    
+        res = self.table.select_version(search_key, search_key_index, projected_columns_index, relative_version)
+        return res
     """
     # Update a record with specified key and columns
     # Returns True if update is succesful
@@ -94,7 +93,7 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
-        pass
+        return self.table.sum_version(start_range, end_range, aggregate_column_index, relative_version)
 
     
     """
