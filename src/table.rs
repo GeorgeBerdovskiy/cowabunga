@@ -676,9 +676,13 @@ impl Table {
 
 
 
-    pub fn get_version(&self, rid: RID, mut tail_rid: RID, relative_version: i64) -> RID {
+    /// returns (true, RID) for base and (false, RID) for tail
+    pub fn get_version(&self, rid: RID, mut tail_rid: RID, relative_version: i64) -> (bool, RID) {
+
+        println!("get_v: RID {}; TAIL_RID {}", rid, tail_rid);
 
         let mut version = 0;
+        // TODO: this is set to 1 only for printing purposes.
         let mut projected_columns: Vec<usize> = vec![1; self.num_columns + NUM_METADATA_COLS];
 
         // get indirection
@@ -717,8 +721,14 @@ impl Table {
             }
             version -= 1;
         }
+        if tail_rid == rid {
+            println!("get_v says BASE");
+        } else {
+            println!("get_v says TAIL");
+        }
+
         println!{"ret: {}", tail_rid};
-        return tail_rid
+        return ((tail_rid == rid), tail_rid as RID)
     }
 
 
@@ -885,27 +895,46 @@ impl Table {
                 // We DO have a most recent tail record - let's find it!
                 let tail_rid = base_columns[indir_idx].unwrap() as usize;
 
-                let historic_rid = self.get_version(rid, tail_rid, relative_version);
+                let (is_base, historic_rid) = self.get_version(rid, tail_rid, relative_version);
                 println!("RID ret: {}", historic_rid);
                 let historic_address = self.page_directory[&historic_rid];
 
-                // TODO
-                // PROBLEM: THIS COULD BE BASE OR TAIL??????
-                match self.page_ranges[historic_address.range].read_tail_record(historic_address.page, historic_address.offset, &effective_proj) {
-                    Ok(cols) => {
+                if is_base {
+                    match self.page_ranges[historic_address.range].read_base_record(historic_address.page, historic_address.offset, &effective_proj) {
+                        Ok(cols) => {
 
-                println!("RETURNING [");
-                        for val in &cols {
-                            match val {
-                                None => {println!("\tNone");},
-                                Some(v) => {println!("\t{}",v);}
+                            // DEBUG
+                    println!("(BASE) RETURNING [");
+                            for val in &cols {
+                                match val {
+                                    None => {println!("\tNone");},
+                                    Some(v) => {println!("\t{}",v);}
+                                }
                             }
-                        }
-                println!("]");
+                    println!("]");
 
-                        return Ok(cols.into_iter().take(col_length).collect());
-                    },
-                    Err(_) => {panic!("Couldn't get relative version.")}
+                            return Ok(cols.into_iter().take(col_length).collect());
+                        },
+                        Err(_) => {panic!("Couldn't get relative version.")}
+                    }
+                } else {
+                    match self.page_ranges[historic_address.range].read_tail_record(historic_address.page, historic_address.offset, &effective_proj) {
+                        Ok(cols) => {
+
+                            // DEBUG
+                    println!("(TAIL) RETURNING [");
+                            for val in &cols {
+                                match val {
+                                    None => {println!("\tNone");},
+                                    Some(v) => {println!("\t{}",v);}
+                                }
+                            }
+                    println!("]");
+
+                            return Ok(cols.into_iter().take(col_length).collect());
+                        },
+                        Err(_) => {panic!("Couldn't get relative version.")}
+                    }
                 }
             },
 
