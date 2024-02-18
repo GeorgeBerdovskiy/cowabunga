@@ -607,55 +607,10 @@ impl Table {
     pub fn select_version(&mut self, search_key: i64, search_key_index: usize, proj: Vec<usize>, relative_version:i64) -> PyResult<Vec<PyRecord>> {
         let rids = self.indexer.locate_range(search_key, search_key, search_key_index);
         let mut results: Vec<PyRecord> = Vec::new();
-        println!("there are {} rids.", rids.len());
-
-        // Ensure the projected columns do not inadvertently include the indirection column
-        // in the final output.
-
-        //let mut effective_projected_columns = projected_columns.clone();
-        //effective_projected_columns.push(1);
-
-        // DEBUG
-        // println!("PROJ [");
-        // for val in &proj {
-        //     println!("\t{}",val);
-        // }
-        // println!("]");
-
 
         for rid in rids {
-            println!("rid: {}", rid);
-
-            // DEBUG
-            // let base_address = self.page_directory[&rid];
-            // match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, &proj) {
-            //     Ok(vc) => {
-            //         println!("rid result no deref: [");
-            //         for val in &vc {
-            //             match val {
-            //                 None => {println!("\tNone");},
-            //                 Some(vvv) => {println!("\t{}",vvv);}
-            //             }
-            //         }
-            //         println!("]");
-            //     },
-            //     Err(_) => {()}
-            // }
-            // END DEBUG
-
-            // CAREFUL AOUT PARAMS!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
             match self.select_by_rid_version(rid, &proj, relative_version) {
                 Ok(column_values) => {
-
-                    // DEBUG
-                    println!("s_b_r_v [");
-                    for val in &column_values {
-                        match val {
-                            None => {println!("\tNone");},
-                            Some(v) => {println!("\t{}",v);}
-                        }
-                    }
-                    println!("]");
 
                     // Now, ensure we only include the requested projected columns
                     if let Some(first_column_value) = column_values.get(0) {
@@ -679,11 +634,10 @@ impl Table {
     /// returns (true, RID) for base and (false, RID) for tail
     pub fn get_version(&self, rid: RID, mut tail_rid: RID, relative_version: i64) -> (bool, RID) {
 
-        println!("get_v: RID {}; TAIL_RID {}", rid, tail_rid);
 
         let mut version = 0;
         // TODO: this is set to 1 only for printing purposes.
-        let mut projected_columns: Vec<usize> = vec![1; self.num_columns + NUM_METADATA_COLS];
+        let mut projected_columns: Vec<usize> = vec![0; self.num_columns + NUM_METADATA_COLS];
 
         // get indirection
         projected_columns[self.num_columns + NUM_METADATA_COLS - 1 - INDIRECTION_REV_IDX] = 1;
@@ -692,42 +646,18 @@ impl Table {
         // starting from the newest version...
         while version > relative_version {
             if tail_rid == rid {
-
-                // TODO: ALL remaning errors print this.
-                // This means that we are actually dealing with a BASE record
-                // but there are different methods for retrieving those.
-                println!{"break get_v()!"};
                 break;
             }
 
-            println!{"deref"};
             let tail_address = self.page_directory[&tail_rid];
 
             match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &projected_columns) {
-                Ok(tail_columns) => {
-                    tail_rid = tail_columns[tail_columns.len() - 1 - INDIRECTION_REV_IDX].unwrap() as usize;
-                    println!("looping {} [", version);
-                    for val in &tail_columns {
-                        match val {
-                            None => {println!("\tNone");},
-                            Some(vvv) => {println!("\t{}",vvv);}
-                        }
-                    }
-                    println!("]");
-                },
-                Err(_) => {
-                    panic!("Error looping through tail rids for select_version");
-                }
+                Ok(tail_columns) => { tail_rid = tail_columns[tail_columns.len() - 1 - INDIRECTION_REV_IDX].unwrap() as usize; },
+                Err(_) => { panic!("Error looping through tail rids for select_version"); }
             }
             version -= 1;
         }
-        if tail_rid == rid {
-            println!("get_v says BASE");
-        } else {
-            println!("get_v says TAIL");
-        }
 
-        println!{"ret: {}", tail_rid};
         return ((tail_rid == rid), tail_rid as RID)
     }
 
@@ -799,13 +729,11 @@ impl Table {
                     }
                 }
             },
-
             Err(_) => {
                 // It doesn't exist or another error occurred... that's fine!
                 return Ok(());
             }
         }
-
         Ok(())
     }
 }
@@ -848,7 +776,6 @@ impl Table {
                 // Do nothing for now
             }
         }
-
         // Silently fail by returning an empty vector - replace with an error in the future
         Ok(vec![])
     }
@@ -862,33 +789,15 @@ impl Table {
         let onehot_indir_idx = self.num_columns + NUM_METADATA_COLS - 1 - INDIRECTION_REV_IDX;
         effective_proj[onehot_indir_idx] = 1;
 
-        // DEBUG
-        // println!("sbrv's EFF_PROJ [");
-        // for val in &effective_proj {
-        //     println!("\t{}",val);
-        // }
-        // println!("]");
-
         // First, get the base record
         match self.page_ranges[base_address.range].read_base_record(base_address.page, base_address.offset, &effective_proj) {
             Ok(base_columns) => {
-
-                // DEBUG
-                println!("got base rec [");
-                for val in &base_columns {
-                    match val {
-                        None => {println!("\tNone");},
-                        Some(v) => {println!("\t{}",v);}
-                    }
-                }
-                println!("]");
 
                 let col_length = base_columns.len() - NUM_METADATA_COLS;
                 let indir_idx = base_columns.len() - 1 - INDIRECTION_REV_IDX;
                 // Check if we have a most recent tail record
                 if base_columns[indir_idx].is_none() {
                     // There is no record more recent than this one! Return it
-                    println!("none indirection!!");
                     return Ok(base_columns.into_iter().take(col_length).collect());
                 }
 
@@ -896,53 +805,24 @@ impl Table {
                 let tail_rid = base_columns[indir_idx].unwrap() as usize;
 
                 let (is_base, historic_rid) = self.get_version(rid, tail_rid, relative_version);
-                println!("RID ret: {}", historic_rid);
                 let historic_address = self.page_directory[&historic_rid];
 
                 if is_base {
                     match self.page_ranges[historic_address.range].read_base_record(historic_address.page, historic_address.offset, &effective_proj) {
-                        Ok(cols) => {
-
-                            // DEBUG
-                    println!("(BASE) RETURNING [");
-                            for val in &cols {
-                                match val {
-                                    None => {println!("\tNone");},
-                                    Some(v) => {println!("\t{}",v);}
-                                }
-                            }
-                    println!("]");
-
-                            return Ok(cols.into_iter().take(col_length).collect());
-                        },
+                        Ok(cols) => { return Ok(cols.into_iter().take(col_length).collect()); },
                         Err(_) => {panic!("Couldn't get relative version.")}
                     }
                 } else {
                     match self.page_ranges[historic_address.range].read_tail_record(historic_address.page, historic_address.offset, &effective_proj) {
-                        Ok(cols) => {
-
-                            // DEBUG
-                    println!("(TAIL) RETURNING [");
-                            for val in &cols {
-                                match val {
-                                    None => {println!("\tNone");},
-                                    Some(v) => {println!("\t{}",v);}
-                                }
-                            }
-                    println!("]");
-
-                            return Ok(cols.into_iter().take(col_length).collect());
-                        },
+                        Ok(cols) => { return Ok(cols.into_iter().take(col_length).collect()); },
                         Err(_) => {panic!("Couldn't get relative version.")}
                     }
                 }
             },
-
             Err(_) => {
                 // Do nothing for now
             }
         }
-
         // Silently fail by returning an empty vector - replace with an error in the future
         Ok(vec![])
     }
