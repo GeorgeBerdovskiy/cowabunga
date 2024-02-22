@@ -6,3 +6,6 @@ pub const CELLS_PER_PAGE: usize = 512;
 
 /// Number of metadata columns.
 pub const NUM_METADATA_COLS: usize = 1;
+
+/// 0-based index of INDIRECTION starting from the end of our columns
+pub const INDIRECTION_REV_IDX: usize = 0;
