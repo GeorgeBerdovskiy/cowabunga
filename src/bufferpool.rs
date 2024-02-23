@@ -143,6 +143,10 @@ impl BufferPool {
             }
 
             if let Some(number) = line.unwrap().parse::<i64>().ok() {
+                if Some(number) == None {
+                    break
+                }
+
                 page_result.write_next(Some(number));
                 cells_remaining -= 1;
             }
