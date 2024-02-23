@@ -2,6 +2,8 @@ use pyo3::{pyclass, pymethods};
 
 use crate::constants::*;
 use crate::errors::*;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Read};
 
 /// Contains one record field. Because all fields are 64 bit integers, we use `i64`.
 /// If a field has been written, it contains `Some(i64)`. Otherwise, it holds `None`.
@@ -121,6 +123,35 @@ impl BufferPool {
 
 // These methods aren't exposed to Python
 impl BufferPool {
+    pub fn get_page(&mut self, tablename: String, column: i64, page_identifier: usize, ) -> Page {
+        let mut page_result = Page::new();
+
+        let filepath = format!("{}-{}", tablename, column); // CHANGE THIS TO THE ACTUAL NAME AND
+        let line_number_to_jump_to = page_identifier * CELLS_PER_PAGE;
+        let byte_to_jump = line_number_to_jump_to * 8 + 1;
+
+        let mut file = File::open(filepath).unwrap();
+        file.seek(SeekFrom::Start(byte_to_jump as u64));
+
+        let mut reader = BufReader::new(file);
+        let mut cells_remaining = CELLS_PER_PAGE;
+
+        for line in reader.lines() {
+            // Parse each line as an i64 and add it to the vector
+            if cells_remaining == 0 {
+                break
+            }
+
+            if let Some(number) = line.unwrap().parse::<i64>().ok() {
+                page_result.write_next(Some(number));
+                cells_remaining -= 1;
+            }
+        }
+        
+        return page_result;
+    }
+
+
     /// Create a new page and add it to the vector of pages. Returns the index of this page.
     pub fn allocate_page(&mut self, ) -> PageIdentifier {
         self.pages.push(Page::new());
