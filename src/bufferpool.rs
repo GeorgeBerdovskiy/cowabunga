@@ -5,6 +5,7 @@ use crate::errors::*;
 use std::path::Path;
 use std::fs::{File, OpenOptions};
 use std::sync::{RwLock, Arc};
+use std::collections::{HashSet, HashMap};
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Read, Write};
 
 
@@ -30,7 +31,6 @@ pub type PageIdentifier = usize;
 pub type Offset = usize;
 
 impl InternCell {
-
     fn new(value: i64) -> Self {
         assert!(value != BP_NULL_VALUE, "InternCell can't be BP_NULL_VALUE");
         InternCell(value)
@@ -86,6 +86,23 @@ impl RetCell {
             Some(value) => println!("  {}", value),
             None => println!("  -")
         }
+    }
+}
+
+#[derive(Hash, Eq, PartialEq, Debug, Clone)]
+pub struct GlobalPageId {
+    table: String,
+    column_id: usize,
+    page_id: usize
+}
+
+impl GlobalPageId {
+    fn new(table: String, column_id: usize, page_id: PageIdentifier) -> Self {
+        GlobalPageId { table, column_id, page_id, }
+    }
+
+    fn new_empty() -> GlobalPageId {
+        GlobalPageId { table: String::new(), column_id: 0, page_id: 0, }
     }
 }
 
@@ -152,9 +169,7 @@ pub struct Frame {
     page: Page,
     dirty: bool,
     empty: bool,
-    table: String,
-    column_id: usize,
-    page_id: PageIdentifier
+    gpid: GlobalPageId
 }
 
 impl Frame {
@@ -163,9 +178,7 @@ impl Frame {
             page: Page::new(),
             dirty: false,
             empty: true,
-            table: String::new(),
-            column_id: 0,
-            page_id: 0
+            gpid: GlobalPageId::new_empty()
         }
     }
 }
@@ -177,35 +190,44 @@ impl Frame {
 #[pyclass]
 pub struct BufferPool {
     /// Contains physical pages for all tables. 
-    frame_arr: [Arc<RwLock<Frame>>; BP_NUM_FRAMES]
+    frame_arr: [Arc<RwLock<Frame>>; BP_NUM_FRAMES],
+    empty_pages: Arc<RwLock<HashSet<usize>>>,  // frames identified by index
+    unpinned_pages: Arc<RwLock<HashSet<usize>>>,  // frames identified by index
+    pinned_pages: Arc<RwLock<HashSet<usize>>>,
+    pagemap: Arc<RwLock<HashMap<GlobalPageId, usize>>>
+
 }
 
 #[pymethods]
 impl BufferPool {
-
     /// Create the buffer pool manager.
     #[new]
     pub fn new() -> Self {
+        // Rust moment
         let mut temp_vec = Vec::with_capacity(BP_NUM_FRAMES);
         for _ in 0..BP_NUM_FRAMES {
             temp_vec.push(Arc::new(RwLock::new(Frame::new())));
         }
 
-        // Rust moment
+        let set_of_all_frames: HashSet<usize> = (0..BP_NUM_FRAMES).collect();
 
         BufferPool {
             frame_arr: temp_vec.try_into().unwrap_or_else(|v: Vec<_>| panic!("Expected a Vec of length {}, got {}", BP_NUM_FRAMES, v.len())),
+            empty_pages: Arc::new(RwLock::new(set_of_all_frames.clone())), // careful to clone one
+            unpinned_pages: Arc::new(RwLock::new(set_of_all_frames)),
+            pinned_pages: Arc::new(RwLock::new(HashSet::new())),
+            pagemap: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
 
 // These methods aren't exposed to Python
 impl BufferPool {
-    pub fn get_page(&self, tablename: String, column: i64, page_identifier: usize, ) -> Page {
+    pub fn get_page_from_file(&self, gpid: GlobalPageId) -> Page {
         let mut page_result = Page::new();
 
-        let filepath = format!("{}-{}.dat", tablename, column); // TODO: CHANGE THIS TO THE ACTUAL NAME
-        let line_number_to_jump_to = page_identifier * CELLS_PER_PAGE;
+        let filepath = format!("{}-{}.dat", gpid.table, gpid.column_id); // TODO: CHANGE THIS TO THE ACTUAL NAME
+        let line_number_to_jump_to = gpid.page_id * CELLS_PER_PAGE;
         let byte_to_jump = line_number_to_jump_to * 8; // TODO: +1??
 
         let mut file = File::open(filepath).unwrap();
@@ -232,7 +254,7 @@ impl BufferPool {
         return page_result;
     }
 
-    pub fn flush_page(&self, page: Page, tablename: String, column: i64, page_identifier: usize) -> io::Result<()> {
+    pub fn flush_page(&self, page: Page, tablename: String, column: usize, page_identifier: usize) -> io::Result<()> {
         let filepath = format!("{}-{}.dat", tablename, column); // TODO: CHANGE THIS TO THE ACTUAL NAME
         let line_number_to_jump_to = page_identifier * CELLS_PER_PAGE;
         let byte_to_jump = line_number_to_jump_to * 8; // assuming no +1
@@ -251,6 +273,69 @@ impl BufferPool {
 
         Ok(())
     }
+
+    pub fn read_pagemap(&self, global_page_id: GlobalPageId) -> Option<usize> {
+        let pagemap_lock = self.pagemap.read().unwrap(); // no err handling
+        pagemap_lock.get(&global_page_id).cloned() // Clone the result to return outside the lock
+    }
+
+    fn bring_page_into_pool(&self, global_page_id: GlobalPageId) -> Arc<RwLock<Frame>> {
+        // this function is called when a page is needed, but it is not in the
+        // pool. TODO: what if multiple readers cause multiple attempts to bring
+        // the same page into a pool frame?
+
+        // Does an unoccupied frame exist?
+        let empty_tracker_read_lock = self.empty_pages.read().unwrap();
+        if empty_tracker_read_lock.len() != BP_NUM_FRAMES {
+            // YES, there is at least one empty frame.
+            drop(empty_tracker_read_lock); // drop the read lock
+            // because now we're writing
+            let empty_tracker_write_lock = self.empty_pages.write().unwrap();
+
+            if let Some(&empty_frame_idx) = empty_tracker_write_lock.iter().next() {
+                empty_tracker_write_lock.remove(&empty_frame_idx);
+                let page_from_disk = self.get_page_from_file(global_page_id);
+
+                // lock frame arr
+                let mut frame_lock = self.frame_arr[empty_frame_idx].write().unwrap();
+                frame_lock.gpid = global_page_id;
+                frame_lock.empty = false;
+                frame_lock.dirty = false;
+                frame_lock.page = page_from_disk;
+
+
+                let mut pagemap_write_lock = self.pagemap.write().unwrap();
+                pagemap_write_lock.entry(global_page_id).and_modify(|e| *e = empty_frame_idx);
+
+                return self.frame_arr[empty_frame_idx];
+
+            } else {
+                panic!("Set is not empty, but couldn't get first element.");
+            }
+
+        } else {
+            // All frames are occupied!
+            // TODO: evict
+        }
+    }
+
+    pub fn locate_pool_frame(&self, tablename: String, column: usize, page_identifier: usize) -> Arc<RwLock<Frame>> {
+        let global_page_id = GlobalPageId::new(tablename, column, page_identifier);
+        // Attempt to locate frame in hash map.
+        match self.read_pagemap(global_page_id) {
+            Some(frame_idx) => {
+                return self.frame_arr[frame_idx];
+            },
+
+            None => {
+                // need to *pull* Page into Frame. Maybe evict!
+                return self.bring_page_into_pool(global_page_id);
+            }
+        }
+    }
+
+
+// TODO: these fns use the old "page" paradigm.
 
     /// Create a new page and add it to the vector of pages. Returns the index of this page.
     pub fn allocate_page(&mut self, ) -> PageIdentifier {
