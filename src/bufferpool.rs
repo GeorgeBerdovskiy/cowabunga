@@ -164,7 +164,7 @@ impl Page {
     }
 }
 
-#[derive(Clone)]
+//#[derive(Clone)]
 pub struct Frame {
     page: Page,
     dirty: bool,
@@ -178,7 +178,7 @@ impl Frame {
             page: Page::new(),
             dirty: false,
             empty: true,
-            gpid: GlobalPageId::new_empty()
+            gpid: GlobalPageId::new_empty(),
         }
     }
 }
@@ -254,9 +254,9 @@ impl BufferPool {
         return page_result;
     }
 
-    pub fn flush_page(&self, page: Page, tablename: String, column: usize, page_identifier: usize) -> io::Result<()> {
-        let filepath = format!("{}-{}.dat", tablename, column); // TODO: CHANGE THIS TO THE ACTUAL NAME
-        let line_number_to_jump_to = page_identifier * CELLS_PER_PAGE;
+    pub fn flush_page(&self, page: Page, gpid: GlobalPageId) -> io::Result<()> {
+        let filepath = format!("{}-{}.dat", gpid.table, gpid.column_id); // TODO: CHANGE THIS TO THE ACTUAL NAME
+        let line_number_to_jump_to = gpid.page_id * CELLS_PER_PAGE;
         let byte_to_jump = line_number_to_jump_to * 8; // assuming no +1
 
         let mut file = OpenOptions::new()
@@ -279,7 +279,7 @@ impl BufferPool {
         pagemap_lock.get(&global_page_id).cloned() // Clone the result to return outside the lock
     }
 
-    fn bring_page_into_pool(&self, global_page_id: GlobalPageId) -> Arc<RwLock<Frame>> {
+    fn bring_page_into_pool(&self, global_page_id: GlobalPageId) -> io::Result<Arc<RwLock<Frame>>> {
         // this function is called when a page is needed, but it is not in the
         // pool. TODO: what if multiple readers cause multiple attempts to bring
         // the same page into a pool frame?
@@ -307,7 +307,7 @@ impl BufferPool {
                 let mut pagemap_write_lock = self.pagemap.write().unwrap();
                 pagemap_write_lock.entry(global_page_id).and_modify(|e| *e = empty_frame_idx);
 
-                return self.frame_arr[empty_frame_idx];
+                return Ok(self.frame_arr[empty_frame_idx].clone());
 
             } else {
                 panic!("Set is not empty, but couldn't get first element.");
@@ -316,17 +316,38 @@ impl BufferPool {
         } else {
             // All frames are occupied!
             // TODO: evict
+            let unpin_r_lock = self.unpinned_pages.read().unwrap();
+            let mut frame_to_evict: usize;
+            if unpin_r_lock.is_empty() {
+                // All pages are pinned!
+                drop(unpin_r_lock);
+                // TODO: need way to wait for availability TODO TODO TODO
+                // let pin_r_lock = self.pinned_pages.read().unwrap();
+                // let frame_to_evict = pin_r_lock.iter().next().unwrap();
+            } else {
+                // there is an unpinned page that we can evict
+                let frame_to_evict = unpin_r_lock.iter().next().unwrap(); // TODO: is it necessary to make this pinned?
+            }
+
+                let mut frame_lock = self.frame_arr[frame_to_evict].write().unwrap();
+                if frame_lock.dirty {
+                    self.flush_page(frame_lock.page, global_page_id)?;
+                    frame_lock.dirty = false;
+                }
+                frame_lock.page = self.get_page_from_file(global_page_id);
+                // it should not be necessary to set frame_lock.empty.
+
+                return Ok(self.frame_arr[frame_to_evict]);
         }
     }
 
-    pub fn locate_pool_frame(&self, tablename: String, column: usize, page_identifier: usize) -> Arc<RwLock<Frame>> {
+    pub fn locate_pool_frame(&self, tablename: String, column: usize, page_identifier: usize) -> io::Result<Arc<RwLock<Frame>>> {
         let global_page_id = GlobalPageId::new(tablename, column, page_identifier);
         // Attempt to locate frame in hash map.
         match self.read_pagemap(global_page_id) {
             Some(frame_idx) => {
-                return self.frame_arr[frame_idx];
+                return Ok(self.frame_arr[frame_idx].clone());
             },
-
             None => {
                 // need to *pull* Page into Frame. Maybe evict!
                 return self.bring_page_into_pool(global_page_id);
