@@ -18,8 +18,8 @@ struct Tail;
 
 /// Represents a **logical** base or tail page, depending on the provided generic type argument.
 struct LogicalPage<T> {
-    /// Name of the table this logical page belongs to.
-    table_name: String,
+    /// Identifier of the table this logical page belongs to.
+    table_identifier: usize,
 
     /// Vector of **physical page identifiers** used by the buffer pool manager.
     columns: Vec<PhysicalPageID>,
@@ -34,10 +34,10 @@ struct LogicalPage<T> {
 /// Methods for all logical pages.
 impl<T> LogicalPage<T> {
     /// Create a new logical page with `num_columns` columns and a shared buffer pool manager.
-    pub fn new(table_name: String, num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> LogicalPage<T> {
+    pub fn new(table_identifier: usize, num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> LogicalPage<T> {
         LogicalPage {
-            table_name: table_name.clone(),
-            columns: buffer_pool_manager.clone().lock().unwrap().allocate_pages(table_name, num_columns),
+            table_identifier,
+            columns: buffer_pool_manager.clone().lock().unwrap().allocate_pages(table_identifier, num_columns),
             buffer_pool_manager,
             phantom: PhantomData::<T>
         }
@@ -105,8 +105,8 @@ impl LogicalPage<Tail> {
 /// Represents a page range. Consists of a set of base pages (which should have a set maximum
 /// size) and a set of tail pages (which is unbounded).
 struct PageRange {
-    /// The name of the table this page range belongs to.
-    table_name: String,
+    /// The identifier of the table this page range belongs to.
+    table_identifier: usize,
 
     /// The set of base pages associated with this page range. Whenever we write to this vector,
     /// we ensure that its length doesn't exceed `BASE_PAGES_PER_RANGE` (defined in `constants.rs`).
@@ -129,15 +129,15 @@ struct PageRange {
 
 impl PageRange {
     /// Create a new page range given the number of columns and a shared buffer pool manager.
-    pub fn new(table_name: String, num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> Self {
+    pub fn new(table_identifier: usize, num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> Self {
         let base_page_vec = (0..BASE_PAGES_PER_RANGE)
-            .map(|_| LogicalPage::new(table_name, num_columns, buffer_pool_manager.clone()))
+            .map(|_| LogicalPage::new(table_identifier, num_columns, buffer_pool_manager.clone()))
             .collect();
 
         PageRange {
-            table_name,
+            table_identifier,
             base_pages: base_page_vec,
-            tail_pages: vec![LogicalPage::<Tail>::new(table_name, num_columns, buffer_pool_manager.clone())],
+            tail_pages: vec![LogicalPage::<Tail>::new(table_identifier, num_columns, buffer_pool_manager.clone())],
             next_base_page: 0,
             num_columns,
             buffer_pool_manager: buffer_pool_manager.clone()
@@ -167,7 +167,7 @@ impl PageRange {
             Ok(offset) => (next_tail_page, offset),
             Err(_) => {
                 // Add a new tail page and try to insert again
-                self.tail_pages.push(LogicalPage::new(self.table_name, self.num_columns, self.buffer_pool_manager.clone()));
+                self.tail_pages.push(LogicalPage::new(self.table_identifier, self.num_columns, self.buffer_pool_manager.clone()));
 
                 // Recursively insert which will have at most one level of recursion
                 return self.insert_tail(columns, indirection);
@@ -189,7 +189,7 @@ impl PageRange {
                 // Failed to insert record because there is no more space in the physical pages
                 // Increment the base page index and try to insert again
                 self.next_base_page += 1;
-                self.base_pages.push(LogicalPage::new(self.table_name, self.num_columns, self.buffer_pool_manager.clone()));
+                self.base_pages.push(LogicalPage::new(self.table_identifier, self.num_columns, self.buffer_pool_manager.clone()));
 
                 // Note that although this call is recursive, it will have a depth of at most one
                 return self.insert_base(columns);
@@ -249,6 +249,9 @@ pub struct Table {
     /// Name of the table.
     #[pyo3(get)]
     pub name: String,
+
+    /// Identifier of the table. This is determined by the buffer pool manager
+    table_identifier: usize,
 
     /// Number of columns.
     #[pyo3(get)]
@@ -370,15 +373,17 @@ impl Table {
     pub fn new(name: String, num_columns: usize, key_column: usize, buffer_pool_manager: &PyAny) -> Self {
         let buffer_pool_manager = buffer_pool_manager.extract::<PyRef<BufferPool>>().unwrap();
         let buffer_pool_manager = Arc::new(Mutex::new(buffer_pool_manager.clone()));
+        let table_identifier = buffer_pool_manager.lock().unwrap().register_table_name(&name);
 
         Table {
             name,
+            table_identifier,
             num_columns,
             key_column,
             next_rid: 0,
 
             // The columns are _ | _ | ... | INDIRECTION
-            page_ranges: vec![PageRange::new(name, num_columns + NUM_METADATA_COLS, buffer_pool_manager.clone())],
+            page_ranges: vec![PageRange::new(table_identifier, num_columns + NUM_METADATA_COLS, buffer_pool_manager.clone())],
             page_directory: HashMap::new(),
             next_page_range: 0,
             buffer_pool_manager,
@@ -424,7 +429,7 @@ impl Table {
 
             Err(_) => {
                 // This page range is full - add new range
-                self.page_ranges.push(PageRange::new(self.name, self.num_columns + NUM_METADATA_COLS, self.buffer_pool_manager.clone()));
+                self.page_ranges.push(PageRange::new(self.table_identifier, self.num_columns + NUM_METADATA_COLS, self.buffer_pool_manager.clone()));
                 self.next_page_range += 1;
 
                 return self.insert(columns);

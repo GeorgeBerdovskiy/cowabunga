@@ -38,11 +38,11 @@ impl Cell {
     }
 }
 
-#[derive(Hash, Eq, PartialEq, Debug, Clone)]
+#[derive(Hash, Eq, PartialEq, Debug, Clone, Copy)]
 /// Contains the physical "address" of a page on the disk.
 pub struct PhysicalPageID {
     /// Name of the table that this page belongs to.
-    table: String,
+    table_identifier: usize,
 
     /// Index of the column that this page belongs to.
     column_index: usize,
@@ -53,8 +53,8 @@ pub struct PhysicalPageID {
 
 impl PhysicalPageID {
     /// Create a new physical page ID given the table name, column index, and page index.
-    fn new(table: String, column_index: usize, page_index: usize) -> Self {
-        PhysicalPageID { table, column_index, page_index, }
+    fn new(table_identifier: usize, column_index: usize, page_index: usize) -> Self {
+        PhysicalPageID { table_identifier, column_index, page_index, }
     }
 }
 
@@ -153,17 +153,29 @@ impl Frame {
     }
 }
 
+/// Contains metadata for a single column
+struct ColumnHeader {
+    /// Index of the next available page (for writing) in the corresponding column file.
+    next_page_index: usize
+}
+
 /// Represents the buffer pool manager. One instance of the buffer pool manager is
 /// shared by _all_ tables using `Arc<Mutex<>>`.
 #[derive(Clone)]
 #[pyclass]
 pub struct BufferPool {
     /// Contains all the frames for the buffer pool.
-    frames: [Arc<RwLock<Frame>>; BP_NUM_FRAMES],
+    frames: Vec<Arc<RwLock<Frame>>>,
     
-    /// Mapes a physical page ID to the index of the frame that contains it. If this map
+    /// Maps a physical page ID to the index of the frame that contains it. If this map
     /// doesn't contain a physical page ID, that means the buffer pool doesn't have it.
-    page_map: Arc<RwLock<HashMap<PhysicalPageID, usize>>>
+    page_map: Arc<RwLock<HashMap<PhysicalPageID, usize>>>,
+
+    /// Contains all the table names that have already been registered
+    table_identifiers: HashMap<String, usize>,
+
+    /// Next available table identifier
+    next_table_id: usize
 }
 
 #[pymethods]
@@ -172,8 +184,8 @@ impl BufferPool {
     #[new]
     pub fn new() -> Self {
         // Initialize the frames
-        const FRAME_INIT: Arc<RwLock<Frame>> = Arc::new(RwLock::new(Frame::new()));
-        let frames = [FRAME_INIT; BP_NUM_FRAMES];
+        let frame = Arc::new(RwLock::new(Frame::new()));
+        let frames = (0..BP_NUM_FRAMES).map(|_| Arc::clone(&frame)).collect();
 
         // Collect the indices of all the frames into a hash set. This represents the
         // set of all empty frames (since we just created the buffer pool)
@@ -182,15 +194,29 @@ impl BufferPool {
         BufferPool {
             frames,
             page_map: Arc::new(RwLock::new(HashMap::new())),
+            table_identifiers: HashMap::new(),
+            next_table_id: 0
         }
     }
 }
 
 // These methods aren't exposed to Python
 impl BufferPool {
+    /// Adds a table name to the map if it isn't there already.
+    pub fn register_table_name(&mut self, name: &str) -> usize {
+        if self.table_identifiers.contains_key(name) {
+            return self.table_identifiers[name];
+        }
+
+        // Otherwise, use the next available table ID
+        self.table_identifiers.insert(name.to_string(), self.next_table_id);
+        self.next_table_id += 1;
+        return self.next_table_id - 1;
+    }
+
     /// Get a page from the disk given its physical page ID.
     fn get_page_from_disk(&self, id: PhysicalPageID) -> Page {
-        let path = format!("{}/{}.dat", id.table, id.column_index);
+        let path = format!("{}/{}.dat", id.table_identifier, id.column_index);
 
         let line_to_seek = id.page_index * CELLS_PER_PAGE;
         let byte_to_seek = line_to_seek * 8;
@@ -219,7 +245,7 @@ impl BufferPool {
 
     /// Write a page to the disk given its physical page ID.
     fn write_page_to_disk(&self, page: Page, id: PhysicalPageID) {
-        let path = format!("{}/{}.dat", id.table, id.column_index);
+        let path = format!("{}/{}.dat", id.table_identifier, id.column_index);
 
         let line_to_seek = id.page_index * CELLS_PER_PAGE;
         let byte_to_seek = line_to_seek * 8;
@@ -275,7 +301,7 @@ impl BufferPool {
 
                 // Next, let's update the page map
                 let mut page_map_lock = self.page_map.write().unwrap();
-                page_map_lock[&global_page_index] = i;
+                page_map_lock.entry(global_page_index).and_modify(|iden| *iden = i);
 
                 // Finally, return the index of the frame that now holds this page
                 return i;
@@ -310,7 +336,7 @@ impl BufferPool {
                 frame.id = Some(global_page_index);
 
                 // Next, let's update the page map with the newly retrieved and loaded page
-                page_map_lock[&global_page_index] = i;
+                page_map_lock.entry(global_page_index).and_modify(|iden| *iden = i);
 
                 // Finally, return the index of the frame that now holds this page
                 return i;
@@ -354,7 +380,7 @@ impl BufferPool {
         frame.id = Some(global_page_index);
 
         // Next, let's update the page map with the newly retrieved and loaded page
-        page_map_lock[&global_page_index] = random_frame_index;
+        page_map_lock.entry(global_page_index).and_modify(|iden| *iden = random_frame_index);
 
         // Finally, return the index of the frame that now holds this page
         return random_frame_index;
@@ -408,26 +434,26 @@ impl BufferPool {
     /// Determine the next available page index for a column given its index and the
     /// table it belongs to. This will access the table's header (metadata) file on disk. In the future,
     /// this may be done entirely in memory and only persisted to disk upon shutdown.
-    fn next_page_index(&self, table_name: String, column_index: usize) -> usize {
+    fn next_page_index(&self, table_id: usize, column_index: usize) -> usize {
         unimplemented!()
     }
 
     /// Update the next available page index for a column on disk
-    fn update_page_index(&self, table_name: String, column_index: usize, new_id: usize) {
+    fn update_page_index(&self, table_id: usize, column_index: usize, new_id: usize) {
         unimplemented!()
     }
 
     /// Allocate an entirely new page. Returns the index physical page ID
     /// for this newly allocated page.
-    pub fn allocate_page(&mut self, table_name: String, column_index: usize) -> PhysicalPageID {
+    pub fn allocate_page(&mut self, table_id: usize, column_index: usize) -> PhysicalPageID {
         // Since we're allocating this page, it clearly doesn't exist in memory OR on
         // the disk, so we need to add it.
 
         // We have the table name and column index - all we need to know is the page index to
         // create the physical page ID. However, we can't just initialize a new one without writing
         // it to the disk first. Otherwise, we can't use functions like `write_page`
-        let page_index = self.next_page_index(table_name, column_index);
-        let id = PhysicalPageID::new(table_name, column_index, page_index);
+        let page_index = self.next_page_index(table_id, column_index);
+        let id = PhysicalPageID::new(table_id, column_index, page_index);
 
         // Next, write an empty page to the right column file
         self.write_page_to_disk(Page::new(), id);
@@ -438,7 +464,7 @@ impl BufferPool {
 
         // Before we finish here, make sure to update the next available page index
         // This will write to the header file on disk
-        self.update_page_index(table_name, column_index, page_index + 1);
+        self.update_page_index(table_id, column_index, page_index + 1);
 
         // At this point, we have allocated a new page for the requested table and column. This page
         // exists on the disk (although it's empty) and is probably also in the buffer pool at this point.
@@ -446,8 +472,8 @@ impl BufferPool {
     }
 
     /// Create _several_ NEW pages.
-    pub fn allocate_pages(&mut self, table_name: String, count: usize) -> Vec<PhysicalPageID> {
-        (0..count).map(|i| self.allocate_page(table_name, i)).collect()
+    pub fn allocate_pages(&mut self, table_id: usize, count: usize) -> Vec<PhysicalPageID> {
+        (0..count).map(|i| self.allocate_page(table_id, i)).collect()
     }
 
     /// Write a value given an offset on a page.
