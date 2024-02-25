@@ -282,7 +282,7 @@ impl BufferPool {
     fn bring_page_into_pool(&self, global_page_id: GlobalPageId) -> io::Result<Arc<RwLock<Frame>>> {
         // this function is called when a page is needed, but it is not in the
         // pool. TODO: what if multiple readers cause multiple attempts to bring
-        // the same page into a pool frame?
+        // the same page into a pool frame? (not sure if problem)
 
         // Does an unoccupied frame exist?
         let empty_tracker_read_lock = self.empty_pages.read().unwrap();
@@ -290,7 +290,7 @@ impl BufferPool {
             // YES, there is at least one empty frame.
             drop(empty_tracker_read_lock); // drop the read lock
             // because now we're writing
-            let empty_tracker_write_lock = self.empty_pages.write().unwrap();
+            let mut empty_tracker_write_lock = self.empty_pages.write().unwrap();
 
             if let Some(&empty_frame_idx) = empty_tracker_write_lock.iter().next() {
                 empty_tracker_write_lock.remove(&empty_frame_idx);
@@ -337,7 +337,7 @@ impl BufferPool {
                 frame_lock.page = self.get_page_from_file(global_page_id);
                 // it should not be necessary to set frame_lock.empty.
 
-                return Ok(self.frame_arr[frame_to_evict]);
+                return Ok(self.frame_arr[frame_to_evict].clone());
         }
     }
 
@@ -350,6 +350,7 @@ impl BufferPool {
             },
             None => {
                 // need to *pull* Page into Frame. Maybe evict!
+                // don't need to clone here because it should already be.
                 return self.bring_page_into_pool(global_page_id);
             }
         }
