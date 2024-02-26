@@ -2,107 +2,59 @@ use pyo3::{pyclass, pymethods};
 
 use crate::constants::*;
 use crate::errors::*;
+use crate::table;
 use std::path::Path;
 use std::fs::{File, OpenOptions};
-use std::sync::{RwLock, Arc};
+use std::sync::{RwLock, Arc, RwLockWriteGuard};
 use std::collections::{HashSet, HashMap};
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Read, Write};
 
+use rand::Rng;
 
-// SPECIAL NULL HANDLING: we will reserve i64::MIN as our special null bit
-// pattern. Internally to this file, this representation is invariant.
-// WHEN WE RETURN a value, it will be made into Option<i64>.
-
-// CELL COUNT: we use the 512th byte (if you start from 1) for cell count
-// (as usize).
-
-/// Contains one record field. Because all fields are 64 bit integers, we use `i64`.
+/// Contains a single field. Because all fields are 64 bit integers, we use `i64`.
 /// If a field has been written, it contains `Some(i64)`. Otherwise, it holds `None`.
 #[derive(Copy, Clone, Debug)]
-struct RetCell(Option<i64>);
+struct Cell(Option<i64>);
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-struct InternCell(i64);
-
-/// Represents the index of a page.
 pub type PageIdentifier = usize;
 
 /// Represents a physical page offset.
 pub type Offset = usize;
 
-impl InternCell {
-    fn new(value: i64) -> Self {
-        assert!(value != BP_NULL_VALUE, "InternCell can't be BP_NULL_VALUE");
-        InternCell(value)
-    }
-
-    pub fn new_opt_i64(value: Option<i64>) -> Self {
-        match value {
-            Some(val) => {InternCell(val)},
-            None => {InternCell(BP_NULL_VALUE)}
-        }
-    }
-
-    /// Create a new **empty** cell.
-    pub fn empty() -> Self {
-        InternCell(BP_NULL_VALUE)
-    }
-
-    fn is_null(&self) -> bool {
-        self.0 == BP_NULL_VALUE
-    }
-
-    pub fn value(&self) -> Option<i64> {
-        if self.is_null() {
-            None
-        } else {
-            Some(self.0)
-        }
-    }
-
-    pub fn print(&self) {
-        if self.0 == BP_NULL_VALUE { // Directly compare the i64 value inside InternCell
-            println!("  -");
-        } else {
-            println!("  {}", self.0); // Print the inner i64 value directly
-        }
-    }
-}
-
-
-impl RetCell {
+impl Cell {
     /// Create a new cell.
     pub fn new(value: Option<i64>) -> Self {
-        RetCell(value)
+        Cell(value)
     }
 
-    /// Create a new **empty** cell.
+    /// Create a new empty cell.
     pub fn empty() -> Self {
-        RetCell(None)
+        Cell(None)
     }
 
-    pub fn print(&self) {
-        match self.0 {
-            Some(value) => println!("  {}", value),
-            None => println!("  -")
-        }
+    /// Return the value in this cell
+    pub fn value(&self) -> Option<i64> {
+        self.0
     }
 }
 
 #[derive(Hash, Eq, PartialEq, Debug, Clone)]
-pub struct GlobalPageId {
+/// Contains the physical "address" of a page on the disk.
+pub struct PhysicalPageID {
+    /// Name of the table that this page belongs to.
     table: String,
-    column_id: usize,
-    page_id: usize
+
+    /// Index of the column that this page belongs to.
+    column_index: usize,
+
+    /// The index of this page in its file.
+    page_index: usize
 }
 
-impl GlobalPageId {
-    fn new(table: String, column_id: usize, page_id: PageIdentifier) -> Self {
-        GlobalPageId { table, column_id, page_id, }
-    }
-
-    fn new_empty() -> GlobalPageId {
-        GlobalPageId { table: String::new(), column_id: 0, page_id: 0, }
+impl PhysicalPageID {
+    /// Create a new physical page ID given the table name, column index, and page index.
+    fn new(table: String, column_index: usize, page_index: usize) -> Self {
+        PhysicalPageID { table, column_index, page_index, }
     }
 }
 
@@ -111,91 +63,107 @@ impl GlobalPageId {
 #[derive(Clone, Copy, Debug)]
 pub struct Page {
     /// Fixed size array of cells.
-    cells: [InternCell; CELLS_PER_PAGE - 1],  // one cell is reserved for count
-
-    /// The number of cells currently written. Also represents the next available index.
-    cell_count: usize,
+    cells: [Cell; CELLS_PER_PAGE], // Note that the last slot is reserved for the cell count
 }
 
 impl Page {
-    /// Create a new memory represntation of an empty physical page.
+    /// Create new empty page.
     pub fn new() -> Self {
-        Page {
-            cells: [InternCell::empty(); CELLS_PER_PAGE - 1], // reserved
-            cell_count: 0,
-        }
+        // Create the array of emtpy cells and set the last slot to the index of
+        // the next available cell (zero at first)
+        let mut cells = [Cell::empty(); CELLS_PER_PAGE];
+        cells[511] = Cell::new(Some(0));
+        Page { cells }
     }
 
-    pub fn print(&self) {
-        println!("[");
-        for cell in self.cells {
-            cell.print()
-        }
-        println!("]");
+    /// Create a page from an array of cells.
+    pub fn from_data(cells: [Cell; 512]) -> Self {
+        Page { cells }
     }
 
     /// Write a value to this page at the given offset.
     pub fn write(&mut self, offset: Offset, value: Option<i64>) -> Result<Offset, DatabaseError> {
         if offset >= CELLS_PER_PAGE - 1 {
+            // The user may be trying to write to the cell count cell or beyond, which is not allowed
             return Err(DatabaseError::OffsetOOB);
         }
 
-        // TODO: fix case where the write isn't a write_next (aka append)
-        // (cell count shouldn't be updated)
+        self.cells[offset] = Cell::new(value);
+        Ok(offset)
+    }
 
-        self.cells[offset] = InternCell::new_opt_i64(value);
-        self.cell_count += 1;
+    /// Get the index of the next available cell for this page.
+    fn cell_count(&self) -> i64 {
+        self.cells[CELLS_PER_PAGE - 1].value().unwrap()
+    }
 
-        Ok(self.cell_count - 1)
+    /// Increment the index of the next available cell for this page.
+    fn increment_cell_count(&mut self) {
+        let previous_count = self.cell_count();
+        self.cells[CELLS_PER_PAGE - 1] = Cell::new(Some(previous_count + 1));
     }
 
     /// Write a value to the next available cell in this page.
     pub fn write_next(&mut self, value: Option<i64>) -> Result<Offset, DatabaseError> {
-        self.write(self.cell_count, value)
+        // First, try writing to the next available cell (which may return an error)
+        self.write(self.cell_count() as usize, value)?;
+
+        // Then, increment the cell count
+        self.increment_cell_count();
+
+        // Return the cell that we wrote to (which is now the current cell count, minus one)
+        Ok((self.cell_count() - 1) as usize)
     }
 
     /// Read a single cell from a physical page.
     pub fn read(&self, offset: usize) -> Result<Option<i64>, DatabaseError> {
-        if offset >= self.cells.len() {
+        if offset >= CELLS_PER_PAGE - 1 {
+            // The user may be trying to read from the cell count cell or beyond, which is not allowed
             return Err(DatabaseError::OffsetOOB);
         }
 
+        // Otherwise, just return the value from the requested cell
         Ok(self.cells[offset].value())
     }
 }
 
-//#[derive(Clone)]
+/// Represents a single buffer pool frame.
 pub struct Frame {
-    page: Page,
+    /// Page data stored inside this frame.
+    page: Option<Page>,
+
+    /// If this field is true, the page must be written to the disk before eviction.
     dirty: bool,
+
+    /// If this field is true, this frame should actually be considered empty.
     empty: bool,
-    gpid: GlobalPageId
+
+    /// The physical page ID of the page currently held by this frame.
+    id: Option<PhysicalPageID>
 }
 
 impl Frame {
     pub fn new() -> Self {
         Frame {
-            page: Page::new(),
+            page: None,
             dirty: false,
             empty: true,
-            gpid: GlobalPageId::new_empty(),
+            id: None
         }
     }
 }
 
-/// Represents the buffer pool manager. For now it only interacts with the memory, but in future
-/// milestones, it'll interact with the disk as well. One instance of the buffer pool manager is
+/// Represents the buffer pool manager. One instance of the buffer pool manager is
 /// shared by _all_ tables using `Arc<Mutex<>>`.
 #[derive(Clone)]
 #[pyclass]
 pub struct BufferPool {
-    /// Contains physical pages for all tables. 
-    frame_arr: [Arc<RwLock<Frame>>; BP_NUM_FRAMES],
-    empty_pages: Arc<RwLock<HashSet<usize>>>,  // frames identified by index
-    unpinned_pages: Arc<RwLock<HashSet<usize>>>,  // frames identified by index
-    pinned_pages: Arc<RwLock<HashSet<usize>>>,
-    pagemap: Arc<RwLock<HashMap<GlobalPageId, usize>>>
-
+    /// Contains all the frames for the buffer pool.
+    frames: [Arc<RwLock<Frame>>; BP_NUM_FRAMES],
+    
+    /// Mapes a physical page ID to the index of the frame that contains it. If this map
+    /// doesn't contain a physical page ID, that means the buffer pool doesn't have it.
+    page_map: Arc<RwLock<HashMap<PhysicalPageID, usize>>>
 }
 
 #[pymethods]
@@ -203,163 +171,339 @@ impl BufferPool {
     /// Create the buffer pool manager.
     #[new]
     pub fn new() -> Self {
-        // Rust moment
-        let mut temp_vec = Vec::with_capacity(BP_NUM_FRAMES);
-        for _ in 0..BP_NUM_FRAMES {
-            temp_vec.push(Arc::new(RwLock::new(Frame::new())));
-        }
+        // Initialize the frames
+        const FRAME_INIT: Arc<RwLock<Frame>> = Arc::new(RwLock::new(Frame::new()));
+        let frames = [FRAME_INIT; BP_NUM_FRAMES];
 
+        // Collect the indices of all the frames into a hash set. This represents the
+        // set of all empty frames (since we just created the buffer pool)
         let set_of_all_frames: HashSet<usize> = (0..BP_NUM_FRAMES).collect();
 
         BufferPool {
-            frame_arr: temp_vec.try_into().unwrap_or_else(|v: Vec<_>| panic!("Expected a Vec of length {}, got {}", BP_NUM_FRAMES, v.len())),
-            empty_pages: Arc::new(RwLock::new(set_of_all_frames.clone())), // careful to clone one
-            unpinned_pages: Arc::new(RwLock::new(set_of_all_frames)),
-            pinned_pages: Arc::new(RwLock::new(HashSet::new())),
-            pagemap: Arc::new(RwLock::new(HashMap::new())),
+            frames,
+            page_map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
 
 // These methods aren't exposed to Python
 impl BufferPool {
-    pub fn get_page_from_file(&self, gpid: GlobalPageId) -> Page {
-        let mut page_result = Page::new();
+    /// Get a page from the disk given its physical page ID.
+    fn get_page_from_disk(&self, id: PhysicalPageID) -> Page {
+        let path = format!("{}/{}.dat", id.table, id.column_index);
 
-        let filepath = format!("{}-{}.dat", gpid.table, gpid.column_id); // TODO: CHANGE THIS TO THE ACTUAL NAME
-        let line_number_to_jump_to = gpid.page_id * CELLS_PER_PAGE;
-        let byte_to_jump = line_number_to_jump_to * 8; // TODO: +1??
-
-        let mut file = File::open(filepath).unwrap();
-        file.seek(SeekFrom::Start(byte_to_jump as u64));
-
-        let reader = BufReader::new(file);
-        let mut cells_remaining = CELLS_PER_PAGE;
-
-        for line in reader.lines() {
-            // Parse each line as an i64 and add it to the vector
-            if cells_remaining == 0 {
-                break
-            }
-
-            if let Some(number) = line.unwrap().parse::<i64>().ok() {
-                if Some(number) == None {
-                    break
-                }
-
-                page_result.write_next(Some(number));
-                cells_remaining -= 1;
-            }
-        }
-        return page_result;
-    }
-
-    pub fn flush_page(&self, page: Page, gpid: GlobalPageId) -> io::Result<()> {
-        let filepath = format!("{}-{}.dat", gpid.table, gpid.column_id); // TODO: CHANGE THIS TO THE ACTUAL NAME
-        let line_number_to_jump_to = gpid.page_id * CELLS_PER_PAGE;
-        let byte_to_jump = line_number_to_jump_to * 8; // assuming no +1
+        let line_to_seek = id.page_index * CELLS_PER_PAGE;
+        let byte_to_seek = line_to_seek * 8;
 
         let mut file = OpenOptions::new()
+            .read(true)
             .write(true)
             .create(true)
-            .open(Path::new(&filepath))?;
+            .open(path)
+            .unwrap();
 
-        file.seek(SeekFrom::Start(byte_to_jump as u64))?;
+        file.seek(SeekFrom::Start(byte_to_seek as u64));
 
-        for &cell in &page.cells {
-            // Convert the i64 to bytes and write
-            file.write_all(&cell.0.to_le_bytes())?;
+        let mut page_buffer: [u8; 4096] = [0; 4096];
+        file.read_exact(&mut page_buffer).unwrap();
+
+        let page: [i64; 512] = unsafe {
+            // SAFETY - This assumes that the memory layouts of [u8; 4096] and [i64; 512] are the same
+            std::mem::transmute(page_buffer)
+        };
+
+        let mut page = page.map(|value| if value == i64::MIN { Cell::empty() } else { Cell::new(Some(value)) });
+
+        Page::from_data(page)
+    }
+
+    /// Write a page to the disk given its physical page ID.
+    fn write_page_to_disk(&self, page: Page, id: PhysicalPageID) {
+        let path = format!("{}/{}.dat", id.table, id.column_index);
+
+        let line_to_seek = id.page_index * CELLS_PER_PAGE;
+        let byte_to_seek = line_to_seek * 8;
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)
+            .unwrap();
+
+        file.seek(SeekFrom::Start(byte_to_seek as u64));
+
+        let page_as_integers = page.cells.map(|value| match value.0 {
+            Some(number) => number,
+            None => i64::MIN
+        });
+
+        let page_buffer: [u8; 4096] = unsafe {
+            // Safety: This assumes that the memory layout of [u8; 4096] and [i64; 512] is the same
+            std::mem::transmute(page_as_integers)
+        };
+
+        file.write(&page_buffer);
+    }
+
+    /// Get the index of a frame given the physical page ID or `None` if the buffer pool
+    /// isn't holding the requested page.
+    pub fn read_page_map(&self, global_page_index: PhysicalPageID) -> Option<usize> {
+        // Get a read lock on the page map
+        let page_map_lock = self.page_map.read().unwrap();
+
+        // Return the index of the requested page (which may not exist here)
+        page_map_lock.get(&global_page_index).cloned()
+    }
+
+    /// Bring page into the buffer pool from the disk and get the index of the frame
+    /// that's chosen to hold it.
+    fn bring_page_into_pool(&self, global_page_index: PhysicalPageID) -> usize {
+        // First, check if an empty frame exists
+        for i in 0..BP_NUM_FRAMES {
+            let mut frame = self.frames[i].write().unwrap();
+            if frame.empty {
+                // We found one! We acquired a write lock on purpose to guarantee that nobody
+                // writes to it while we switch from a read to a write lock
+                let page = self.get_page_from_disk(global_page_index);
+                
+                // TODO - Move this to a function
+                frame.page = Some(page);
+                frame.empty = false;
+                frame.dirty = false;
+                frame.id = Some(global_page_index);
+
+                // Next, let's update the page map
+                let mut page_map_lock = self.page_map.write().unwrap();
+                page_map_lock[&global_page_index] = i;
+
+                // Finally, return the index of the frame that now holds this page
+                return i;
+            }
         }
 
+        // At this point, we failed to get an empty frame (and there will never be an empty frame again)
+        // For this reason, we need to check for a frame that we can evict
+        for i in 0..BP_NUM_FRAMES {
+            if Arc::strong_count(&self.frames[i]) == 1 {
+                // The frame in question is only being used by the buffer pool so we can safely evict it
+                // First, get a write lock on it
+                let mut frame = self.frames[i].write().unwrap();
+
+                // Now let's remove it from the page map
+                let mut page_map_lock = self.page_map.write().unwrap();
+                page_map_lock.remove(&frame.id.unwrap());
+
+                if frame.dirty {
+                    // We need to write this frame before evicting it
+                    self.write_page_to_disk(frame.page.unwrap(), frame.id.unwrap());
+                }
+
+                // Now we can safely overwrite this frame
+                // Let's start by grabbing the requested page from the disk
+                let page = self.get_page_from_disk(global_page_index);
+                
+                // TODO - Move this to a function
+                frame.page = Some(page);
+                frame.empty = false;
+                frame.dirty = false;
+                frame.id = Some(global_page_index);
+
+                // Next, let's update the page map with the newly retrieved and loaded page
+                page_map_lock[&global_page_index] = i;
+
+                // Finally, return the index of the frame that now holds this page
+                return i;
+            }
+        }
+
+        // At this point, we did not find a page that could be evicted either. For that reason,
+        // let's just latch onto a random frame until it no longer has any pins
+        let random_frame_index = rand::thread_rng().gen_range(0..BP_NUM_FRAMES);
+        let mut frame: RwLockWriteGuard<Frame>;
+
+        loop {
+            if Arc::strong_count(&self.frames[random_frame_index]) == 1 {
+                // We can now evict the randomly chosen frame!
+                frame = self.frames[random_frame_index].write().unwrap();
+                break;
+            }
+            continue;
+        }
+
+        // We've exited the loop, which means `random_frame` now contains a random frame we can safely evict and overwrite!
+        // The frame in question is only being used by the buffer pool so we can safely evict it
+
+        // Now let's remove it from the page map
+        let mut page_map_lock = self.page_map.write().unwrap();
+        page_map_lock.remove(&frame.id.unwrap());
+
+        if frame.dirty {
+            // We need to write this frame before evicting it
+            self.write_page_to_disk(frame.page.unwrap(), frame.id.unwrap());
+        }
+
+        // Now we can safely overwrite this frame
+        // Let's start by grabbing the requested page from the disk
+        let page = self.get_page_from_disk(global_page_index);
+        
+        // TODO - Move this to a function
+        frame.page = Some(page);
+        frame.empty = false;
+        frame.dirty = false;
+        frame.id = Some(global_page_index);
+
+        // Next, let's update the page map with the newly retrieved and loaded page
+        page_map_lock[&global_page_index] = random_frame_index;
+
+        // Finally, return the index of the frame that now holds this page
+        return random_frame_index;
+    }
+
+    /// Return an entire page given its physical page ID. Requires a mutable reference
+    /// to `self` because this function _may_ need to grab this page from the disk and
+    /// write it to an available frame.
+    pub fn request_page(&mut self, id: PhysicalPageID) -> Page {
+        match self.read_page_map(id) {
+            Some(index) => {
+                // This page is already in the buffer pool - return it
+                return self.frames[index].read().unwrap().page.unwrap();
+            },
+
+            None => {
+                // This page isn't in the buffer pool yet - grab it and try again
+                let index = self.bring_page_into_pool(id);
+                return self.frames[index].read().unwrap().page.unwrap();
+            }
+        }
+    }
+
+    /// Write an entire page given its physical page ID. The page already exists on disk.
+    pub fn write_page(&mut self, page: Page, id: PhysicalPageID) {
+        match self.read_page_map(id) {
+            Some(index) => {
+                // This page is already in the buffer pool - write to it
+                // TODO - Consider whether this may negatively affect other processes
+                let mut frame = self.frames[index].write().unwrap();
+
+                // TODO - Move this to a function
+                frame.dirty = true;
+                frame.page = Some(page);
+            },
+
+            None => {
+                // This page isn't in the buffer pool yet - grab it and try again
+                let index = self.bring_page_into_pool(id);
+                
+                // TODO - Consider whether this may negatively affect other processes
+                let mut frame = self.frames[index].write().unwrap();
+
+                // TODO - Move this to a function
+                frame.dirty = true;
+                frame.page = Some(page);
+            }
+        }
+    }
+
+    /// Determine the next available page index for a column given its index and the
+    /// table it belongs to. This will access the table's header (metadata) file on disk. In the future,
+    /// this may be done entirely in memory and only persisted to disk upon shutdown.
+    fn next_page_index(&self, table_name: String, column_index: usize) -> usize {
+        unimplemented!()
+    }
+
+    /// Update the next available page index for a column on disk
+    fn update_page_index(&self, table_name: String, column_index: usize, new_id: usize) {
+        unimplemented!()
+    }
+
+    /// Allocate an entirely new page. Returns the index physical page ID
+    /// for this newly allocated page.
+    pub fn allocate_page(&mut self, table_name: String, column_index: usize) -> PhysicalPageID {
+        // Since we're allocating this page, it clearly doesn't exist in memory OR on
+        // the disk, so we need to add it.
+
+        // We have the table name and column index - all we need to know is the page index to
+        // create the physical page ID. However, we can't just initialize a new one without writing
+        // it to the disk first. Otherwise, we can't use functions like `write_page`
+        let page_index = self.next_page_index(table_name, column_index);
+        let id = PhysicalPageID::new(table_name, column_index, page_index);
+
+        // Next, write an empty page to the right column file
+        self.write_page_to_disk(Page::new(), id);
+
+        // Finally, write an empty page to the correct buffer pool frame. This function now works
+        // because the newly allocated page is on the disk!
+        self.write_page(Page::new(), id);
+
+        // Before we finish here, make sure to update the next available page index
+        // This will write to the header file on disk
+        self.update_page_index(table_name, column_index, page_index + 1);
+
+        // At this point, we have allocated a new page for the requested table and column. This page
+        // exists on the disk (although it's empty) and is probably also in the buffer pool at this point.
+        return id;
+    }
+
+    /// Create _several_ NEW pages.
+    pub fn allocate_pages(&mut self, table_name: String, count: usize) -> Vec<PhysicalPageID> {
+        (0..count).map(|i| self.allocate_page(table_name, i)).collect()
+    }
+
+    /// Write a value given an offset on a page.
+    pub fn write_value(&mut self, page_id: PhysicalPageID, offset: Offset, value: Option<i64>) -> Result<(), DatabaseError> {
+        // First, grab the requested page
+        let mut page = self.request_page(page_id);
+
+        // Next, write the data
+        page.write(offset, value);
+
+        // Finally, write the page back and return
+        self.write_page(page, page_id);
         Ok(())
     }
 
-    pub fn read_pagemap(&self, global_page_id: GlobalPageId) -> Option<usize> {
-        let pagemap_lock = self.pagemap.read().unwrap(); // no err handling
-        pagemap_lock.get(&global_page_id).cloned() // Clone the result to return outside the lock
+    /// Write a value to the next available offset on a page.
+    pub fn write_next_value(&mut self, page_id: PhysicalPageID, value: Option<i64>) -> Result<Offset, DatabaseError>{
+        // First, grab the requested page
+        let mut page = self.request_page(page_id);
+
+        // Next, write the data
+        let offset = page.write_next(value).unwrap();
+
+        // Finally, write the page back and return
+        self.write_page(page, page_id);
+        Ok(offset)
     }
 
-    fn bring_page_into_pool(&self, global_page_id: GlobalPageId) -> io::Result<Arc<RwLock<Frame>>> {
-        // this function is called when a page is needed, but it is not in the
-        // pool. TODO: what if multiple readers cause multiple attempts to bring
-        // the same page into a pool frame? (not sure if problem)
+    /// Read the value at index `offset` on the page at index `page`.
+    pub fn read(&mut self, page_id: PhysicalPageID, offset: Offset) -> Result<Option<i64>, DatabaseError> {
+        // First, grab the requested page
+        let mut page = self.request_page(page_id);
 
-        // Does an unoccupied frame exist?
-        let empty_tracker_read_lock = self.empty_pages.read().unwrap();
-        if empty_tracker_read_lock.len() != BP_NUM_FRAMES {
-            // YES, there is at least one empty frame.
-            drop(empty_tracker_read_lock); // drop the read lock
-            // because now we're writing
-            let mut empty_tracker_write_lock = self.empty_pages.write().unwrap();
-
-            if let Some(&empty_frame_idx) = empty_tracker_write_lock.iter().next() {
-                empty_tracker_write_lock.remove(&empty_frame_idx);
-                let page_from_disk = self.get_page_from_file(global_page_id);
-
-                // lock frame arr
-                let mut frame_lock = self.frame_arr[empty_frame_idx].write().unwrap();
-                frame_lock.gpid = global_page_id;
-                frame_lock.empty = false;
-                frame_lock.dirty = false;
-                frame_lock.page = page_from_disk;
-
-
-                let mut pagemap_write_lock = self.pagemap.write().unwrap();
-                pagemap_write_lock.entry(global_page_id).and_modify(|e| *e = empty_frame_idx);
-
-                return Ok(self.frame_arr[empty_frame_idx].clone());
-
-            } else {
-                panic!("Set is not empty, but couldn't get first element.");
-            }
-
-        } else {
-            // All frames are occupied!
-            // TODO: evict
-            let unpin_r_lock = self.unpinned_pages.read().unwrap();
-            let mut frame_to_evict: usize;
-            if unpin_r_lock.is_empty() {
-                // All pages are pinned!
-                drop(unpin_r_lock);
-                // TODO: need way to wait for availability TODO TODO TODO
-                // let pin_r_lock = self.pinned_pages.read().unwrap();
-                // let frame_to_evict = pin_r_lock.iter().next().unwrap();
-            } else {
-                // there is an unpinned page that we can evict
-                let frame_to_evict = unpin_r_lock.iter().next().unwrap(); // TODO: is it necessary to make this pinned?
-            }
-
-                let mut frame_lock = self.frame_arr[frame_to_evict].write().unwrap();
-                if frame_lock.dirty {
-                    self.flush_page(frame_lock.page, global_page_id)?;
-                    frame_lock.dirty = false;
-                }
-                frame_lock.page = self.get_page_from_file(global_page_id);
-                // it should not be necessary to set frame_lock.empty.
-
-                return Ok(self.frame_arr[frame_to_evict].clone());
-        }
+        // Then, return the value at the specified offset
+        page.read(offset)
     }
-
-    pub fn locate_pool_frame(&self, tablename: String, column: usize, page_identifier: usize) -> io::Result<Arc<RwLock<Frame>>> {
-        let global_page_id = GlobalPageId::new(tablename, column, page_identifier);
+    
+    /*pub fn locate_pool_frame(&self, tablename: String, column: usize, page_indexentifier: usize) -> io::Result<Arc<RwLock<Frame>>> {
+        let global_page_index = PhysicalPageID::new(tablename, column, page_indexentifier);
         // Attempt to locate frame in hash map.
-        match self.read_pagemap(global_page_id) {
+        match self.read_pagemap(global_page_index) {
             Some(frame_idx) => {
-                return Ok(self.frame_arr[frame_idx].clone());
+                return Ok(self.frames[frame_idx].clone());
             },
             None => {
                 // need to *pull* Page into Frame. Maybe evict!
                 // don't need to clone here because it should already be.
-                return self.bring_page_into_pool(global_page_id);
+                return self.bring_page_into_pool(global_page_index);
             }
         }
-    }
+    }*/
 
 
 // TODO: these fns use the old "page" paradigm.
 
-    /// Create a new page and add it to the vector of pages. Returns the index of this page.
+    /*/// Create a new page and add it to the vector of pages. Returns the index of this page.
     pub fn allocate_page(&mut self, ) -> PageIdentifier {
         self.pages.push(Page::new());
         self.pages.len() - 1
@@ -400,5 +544,5 @@ impl BufferPool {
 
         // Page index is in bounds - proceed to write
         self.pages[page].read(offset)
-    }
+    }*/
 }
