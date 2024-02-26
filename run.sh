@@ -2,4 +2,4 @@ cargo build
 
 pip install .
 
-python3 $1
+RUST_BACKTRACE=1 python3 $1

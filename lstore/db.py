@@ -2,15 +2,22 @@ from cowabunga_rs import table_module, buffer_pool_module
 
 class Database():
     def __init__(self):
+        self.directory = "cowdat"
         self.tables = []
         self.bpm = buffer_pool_module.BufferPool()
 
     # Not required for milestone1
     def open(self, path):
-        pass
+        # MUST OPEN A NEW BUFFER POOL!
+        self.bpm = buffer_pool_module.BufferPool()
+        self.directory = path
+        self.bpm.set_directory(path)
 
     def close(self):
-        pass
+        for table in self.tables:
+            table.persist()
+        
+        self.bpm.persist()
 
     """
     # Creates a new table
@@ -19,7 +26,9 @@ class Database():
     :param key: int             #Index of table key in columns
     """
     def create_table(self, name, num_columns, key_index):
-        table = table_module.Table(name, num_columns, key_index, self.bpm)
+        table = table_module.Table(self.directory, name, num_columns, key_index, self.bpm)
+        print("Done creating table, now appending it")
+        self.tables.append(table)
         return table
 
     """
@@ -28,9 +37,10 @@ class Database():
     def drop_table(self, name):
         pass
 
-
     """
     # Returns table with the passed name
     """
     def get_table(self, name):
-        pass
+        table = table_module.Table(self.directory, name, 0, 0, self.bpm)
+        self.tables.append(table)
+        return table
