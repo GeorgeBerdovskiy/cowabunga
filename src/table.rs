@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{hash_set, BTreeMap, HashSet};
 use std::{collections::HashMap, marker::PhantomData};
 use std::sync::{Arc, Mutex};
 use std::ops::Bound::Included;
@@ -117,7 +117,13 @@ struct PageRange {
     num_columns: usize,
 
     /// Shared buffer pool manager.
-    buffer_pool_manager: Arc<Mutex<BufferPool>>
+    buffer_pool_manager: Arc<Mutex<BufferPool>>,
+
+    /// Number of updates since last merge
+    num_updates: usize,
+
+    /// Tail page sequence number of the last merged tail record
+    TPS: usize
 }
 
 impl PageRange {
@@ -132,7 +138,9 @@ impl PageRange {
             tail_pages: vec![LogicalPage::<Tail>::new(num_columns, buffer_pool_manager.clone())],
             next_base_page: 0,
             num_columns,
-            buffer_pool_manager: buffer_pool_manager.clone()
+            buffer_pool_manager: buffer_pool_manager.clone(),
+            num_updates:0,
+            TPS:0
         }
     }
 
@@ -602,6 +610,42 @@ impl Table {
         }
 
         Ok(sum)
+    }
+
+    pub fn merge(&mut self, pageRange: PageRange) {
+            /// merging data
+        let base_pages: Vec<LogicalPage<Base>> = pageRange.base_pages;
+        let result: Vec<LogicalPage<Base>>;
+        let projection: &Vec<usize> = &vec![1; pageRange.num_columns + 1];
+
+        for page in base_pages {
+            // TODO clarify this w george and nate
+            let mut copied_base:LogicalPage<Base> = LogicalPage::new(self.num_columns, self.buffer_pool_manager);
+
+            for offset in 0..CELLS_PER_PAGE {
+                let record = page.read(offset, projection).unwrap();
+                let indirection = record[record.len() - 1];
+
+                if indirection.is_none() {
+                    copied_base.write_next(record[1..record.len() - 1]);
+                }
+                else {
+                    let tail_rid = indirection.unwrap() as usize;
+                    let tail_address = self.page_directory[&tail_rid];
+
+                    match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &projection) {
+                        Ok(tail_columns) => {
+                            copied_base.write_next(1..tail_columns.len() - 1);
+                            
+                        },
+                        Err(_) => {
+                            // Do nothing for now
+                        }
+                    }
+                }
+            }
+        }
+        pageRange.base_pages = result;
     }
 
     pub fn select_version(&mut self, search_key: i64, search_key_index: usize, proj: Vec<usize>, relative_version:i64) -> PyResult<Vec<PyRecord>> {
