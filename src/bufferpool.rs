@@ -189,7 +189,7 @@ pub struct BufferPool {
 struct BufferPoolMetadata {
     page_map: HashMap<PhysicalPageID, usize>,
     table_identifiers: HashMap<String, usize>,
-    next_table_id: usize
+    next_table_id: usize,
 }
 
 #[pymethods]
@@ -262,6 +262,17 @@ impl BufferPool {
             .unwrap();
         
         metadata_file.write(serialized_metadata.as_bytes());
+
+        // Now write all the dirty frames
+        for i in 0..BP_NUM_FRAMES {
+            let frame = self.frames[i].read().unwrap();
+            if frame.dirty {
+                // Write page inside this frame to the disk
+                self.write_page_to_disk(frame.page.unwrap(), frame.id.unwrap());
+            }
+        }
+
+        // All data has been persisted!
     }
 }
 
@@ -377,7 +388,7 @@ impl BufferPool {
         // At this point, we failed to get an empty frame (and there will never be an empty frame again)
         // For this reason, we need to check for a frame that we can evict
         for i in 0..BP_NUM_FRAMES {
-            if Arc::strong_count(&self.frames[i]) - 64 == 0 {
+            if Arc::strong_count(&self.frames[i]) - (BP_NUM_FRAMES * 2) == 0 {
                 // The frame in question is only being used by the buffer pool so we can safely evict it
                 // First, get a write lock on it
                 let mut frame = self.frames[i].write().unwrap();
@@ -415,7 +426,7 @@ impl BufferPool {
         let mut frame: RwLockWriteGuard<Frame>;
 
         loop {
-            if Arc::strong_count(&self.frames[random_frame_index]) - 64 == 0 {
+            if Arc::strong_count(&self.frames[random_frame_index]) - (BP_NUM_FRAMES * 2) == 0 {
                 // We can now evict the randomly chosen frame!
                 frame = self.frames[random_frame_index].write().unwrap();
                 break;

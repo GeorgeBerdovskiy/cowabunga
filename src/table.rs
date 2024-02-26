@@ -440,13 +440,13 @@ impl Table {
                         .unwrap();
         
                     col_hdr_file.write(col_hdr_serialized.as_bytes());
-                    println!("Done writign column {:?}", i);
+                    //println!("Done writign column {:?}", i);
                 }
         
-                println!("Peraring to create the page ranges");
+                //println!("Peraring to create the page ranges");
                 let page_ranges = vec![PageRange::new(table_identifier, num_columns + NUM_METADATA_COLS, buffer_pool_manager.clone())];
         
-                println!("Done creating page ranges, preparing to return the tabl,e....");
+                //println!("Done creating page ranges, preparing to return the tabl,e....");
         
                 return Table {
                     directory,
@@ -550,24 +550,26 @@ impl Table {
     }
 
     /// Create a new **base record**.
-    pub fn insert(&mut self, columns: Vec<i64>) -> PyResult<()> {
+    pub fn insert(&mut self, columns: Vec<i64>) -> bool {
         // Some functions take a vector of optionals rather than integers because updates use `None`
         // to signal that a value isn't updated. However, we want to require that all columns are
         // provided for _new_ records. For this reason, we wrap them inside `Some` here.
         let columns_wrapped: Vec<Option<i64>> = columns.iter().map(|val| Some(*val)).collect();
 
         if columns.len() < self.num_columns {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            /*return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 format!("Table has {} columns, but only {} were provided.", self.num_columns, columns.len()),
-            ));
+            ));*/
+            return false;
         }
 
         let matching_rids = self.indexer.locate_range(columns[self.key_column], columns[self.key_column], self.key_column);
 
         if matching_rids.len() != 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            /*return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 format!("Record with identifier {} already exists.", columns[self.key_column]),
-            ));
+            ));*/
+            return false;
         }
 
         match self.page_ranges[self.next_page_range].insert_base(&columns_wrapped) {
@@ -580,7 +582,8 @@ impl Table {
                 // Increment the RID for the next record
                 self.next_rid += 1;
 
-                Ok(())
+                // Ok(())
+                return true;
             },
 
             Err(_) => {
