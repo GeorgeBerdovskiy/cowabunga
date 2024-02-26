@@ -777,44 +777,7 @@ impl Table {
         Ok(sum)
     }
 
-    pub fn merge(&mut self, mut pageRange: PageRange) {
-            /// merging data
-        let base_pages: Vec<LogicalPage<Base>> = pageRange.base_pages;
-        let mut result: Vec<LogicalPage<Base>>;
-        let projection: &Vec<usize> = &vec![1; pageRange.num_columns + 1];
 
-        for page in base_pages {
-            // TODO clarify this w george and nate
-            let mut copied_base:LogicalPage<Base> = LogicalPage::new(self.name, self.num_columns, self.buffer_pool_manager);
-
-            for offset in 0..CELLS_PER_PAGE {
-                let mut record = page.read(offset, projection).unwrap();
-                let indirection = record[record.len() - 1];
-
-                if indirection.is_none() {
-                    record.pop();
-                    copied_base.insert(&record);
-                }
-                else {
-                    let tail_rid = indirection.unwrap() as usize;
-                    let tail_address = self.page_directory[&tail_rid];
-
-                    match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &projection) {
-                        Ok(mut tail_columns) => {
-                            tail_columns.pop();
-                            copied_base.insert(&tail_columns);
-                            
-                        },
-                        Err(_) => {
-                            // Do nothing for now
-                        }
-                    }
-                }
-            }
-            result.push(copied_base);
-        }
-        pageRange.base_pages = result;
-    }
 
     pub fn select_version(&mut self, search_key: i64, search_key_index: usize, proj: Vec<usize>, relative_version:i64) -> PyResult<Vec<PyRecord>> {
         let rids = self.indexer.locate_range(search_key, search_key, search_key_index);
@@ -1035,5 +998,44 @@ impl Table {
         }
         // Silently fail by returning an empty vector - replace with an error in the future
         Ok(vec![])
+    }
+
+    pub fn merge(&mut self, page_range:&mut PageRange){
+        /// merging data
+    let base_pages: Vec<LogicalPage<Base>> = page_range.base_pages;
+    let mut result: Vec<LogicalPage<Base>>;
+    let projection: &Vec<usize> = &vec![1; page_range.num_columns + 1];
+
+    for page in base_pages {
+        // TODO clarify this w george and nate
+        let mut copied_base:LogicalPage<Base> = LogicalPage::new(self.table_identifier, self.num_columns, self.buffer_pool_manager);
+
+        for offset in 0..CELLS_PER_PAGE {
+            let mut record = page.read(offset, projection).unwrap();
+            let indirection = record[record.len() - 1];
+
+            if indirection.is_none() {
+                record.pop();
+                copied_base.insert(&record);
+            }
+            else {
+                let tail_rid = indirection.unwrap() as usize;
+                let tail_address = self.page_directory[&tail_rid];
+
+                match self.page_ranges[tail_address.range].read_tail_record(tail_address.page, tail_address.offset, &projection) {
+                    Ok(mut tail_columns) => {
+                        tail_columns.pop();
+                        copied_base.insert(&tail_columns);
+                        
+                    },
+                    Err(_) => {
+                        // Do nothing for now
+                        }
+                    }
+                }
+            }
+            result.push(copied_base);
+        }
+        page_range.base_pages = result;
     }
 }
