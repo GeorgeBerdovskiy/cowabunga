@@ -1,8 +1,10 @@
 use pyo3::{pyclass, pymethods};
 
+use serde::{Serialize, Deserialize};
 use crate::constants::*;
 use crate::errors::*;
 use crate::table;
+use std::hash::Hash;
 use std::path::Path;
 use std::fs::{File, OpenOptions};
 use std::sync::{RwLock, Arc, RwLockWriteGuard};
@@ -38,11 +40,12 @@ impl Cell {
     }
 }
 
-#[derive(Hash, Eq, PartialEq, Debug, Clone)]
+#[derive(Hash, Eq, PartialEq, Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize)]
 /// Contains the physical "address" of a page on the disk.
 pub struct PhysicalPageID {
     /// Name of the table that this page belongs to.
-    table: String,
+    table_identifier: usize,
 
     /// Index of the column that this page belongs to.
     column_index: usize,
@@ -53,8 +56,8 @@ pub struct PhysicalPageID {
 
 impl PhysicalPageID {
     /// Create a new physical page ID given the table name, column index, and page index.
-    fn new(table: String, column_index: usize, page_index: usize) -> Self {
-        PhysicalPageID { table, column_index, page_index, }
+    fn new(table_identifier: usize, column_index: usize, page_index: usize) -> Self {
+        PhysicalPageID { table_identifier, column_index, page_index, }
     }
 }
 
@@ -153,17 +156,40 @@ impl Frame {
     }
 }
 
+/// Contains metadata for a single column
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ColumnHeader {
+    /// Index of the next available page (for writing) in the corresponding column file.
+    pub next_page_index: usize
+}
+
 /// Represents the buffer pool manager. One instance of the buffer pool manager is
 /// shared by _all_ tables using `Arc<Mutex<>>`.
 #[derive(Clone)]
 #[pyclass]
 pub struct BufferPool {
+    /// Working directory.
+    directory: String,
+
     /// Contains all the frames for the buffer pool.
-    frames: [Arc<RwLock<Frame>>; BP_NUM_FRAMES],
+    frames: Vec<Arc<RwLock<Frame>>>,
     
-    /// Mapes a physical page ID to the index of the frame that contains it. If this map
+    /// Maps a physical page ID to the index of the frame that contains it. If this map
     /// doesn't contain a physical page ID, that means the buffer pool doesn't have it.
-    page_map: Arc<RwLock<HashMap<PhysicalPageID, usize>>>
+    page_map: Arc<RwLock<HashMap<PhysicalPageID, usize>>>,
+
+    /// Contains all the table names that have already been registered
+    table_identifiers: HashMap<String, usize>,
+
+    /// Next available table identifier
+    next_table_id: usize
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BufferPoolMetadata {
+    page_map: HashMap<PhysicalPageID, usize>,
+    table_identifiers: HashMap<String, usize>,
+    next_table_id: usize
 }
 
 #[pymethods]
@@ -172,25 +198,90 @@ impl BufferPool {
     #[new]
     pub fn new() -> Self {
         // Initialize the frames
-        const FRAME_INIT: Arc<RwLock<Frame>> = Arc::new(RwLock::new(Frame::new()));
-        let frames = [FRAME_INIT; BP_NUM_FRAMES];
+        let frame = Arc::new(RwLock::new(Frame::new()));
+        let frames = (0..BP_NUM_FRAMES).map(|_| Arc::clone(&frame)).collect();
 
-        // Collect the indices of all the frames into a hash set. This represents the
-        // set of all empty frames (since we just created the buffer pool)
-        let set_of_all_frames: HashSet<usize> = (0..BP_NUM_FRAMES).collect();
-
+        // TODO - Open the default directory
         BufferPool {
+            directory: String::from("cowdat"),
             frames,
             page_map: Arc::new(RwLock::new(HashMap::new())),
+            table_identifiers: HashMap::new(),
+            next_table_id: 0
         }
+    }
+
+    /// Set the working directory on disk. This will create the requested directory if it doesn't
+    /// exist yet and open it otherwise. If the directory exists, it will also load all relevant
+    /// metadata into memory.
+    pub fn set_directory(&mut self, path: &str) {
+        let dir_path = Path::new(path);
+
+        if dir_path.exists() {
+            // The requested directory already exists - load all metadata
+            let metadata_path = format!("{}/bp.hdr", path);
+            let mut metadata_file = File::open(metadata_path).unwrap();
+
+            let mut metadata_string = String::new();
+            metadata_file.read_to_string(&mut metadata_string);
+
+            let metadata: BufferPoolMetadata = serde_json::from_str(&metadata_string).unwrap();
+            self.page_map = Arc::new(RwLock::new(metadata.page_map));
+            self.table_identifiers = metadata.table_identifiers;
+            self.next_table_id = metadata.next_table_id;
+        } else {
+            // Directory doesn't exist, so create it
+            std::fs::create_dir(path).unwrap();
+        }
+
+        // At this point the directory definitely exists
+        // Set the directory path
+        self.directory = path.to_string();
+    }
+
+    /// Persist buffer pool metadata 
+    pub fn persist(&self) {
+        // First, collect the metadata into `BufferPoolMetadata`
+        let metadata = BufferPoolMetadata {
+            table_identifiers: self.table_identifiers.clone(),
+            page_map: self.page_map.read().unwrap().clone(),
+            next_table_id: self.next_table_id
+        };
+
+        // Next, generate the buffer pool header path
+        let metadata_path = format!("{}/bp.hdr", self.directory);
+
+        // Next, serialize the metadata
+        let serialized_metadata = serde_json::to_string(&metadata).unwrap();
+
+        // Finally, write the metadata
+        let mut metadata_file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(metadata_path)
+            .unwrap();
+        
+        metadata_file.write(serialized_metadata.as_bytes());
     }
 }
 
 // These methods aren't exposed to Python
 impl BufferPool {
+    /// Adds a table name to the map if it isn't there already.
+    pub fn register_table_name(&mut self, name: &str) -> usize {
+        if self.table_identifiers.contains_key(name) {
+            return self.table_identifiers[name];
+        }
+
+        // Otherwise, use the next available table ID
+        self.table_identifiers.insert(name.to_string(), self.next_table_id);
+        self.next_table_id += 1;
+        return self.next_table_id - 1;
+    }
+
     /// Get a page from the disk given its physical page ID.
     fn get_page_from_disk(&self, id: PhysicalPageID) -> Page {
-        let path = format!("{}/{}.dat", id.table, id.column_index);
+        let path = format!("{}/{}/{}.dat", self.directory, id.table_identifier, id.column_index);
 
         let line_to_seek = id.page_index * CELLS_PER_PAGE;
         let byte_to_seek = line_to_seek * 8;
@@ -219,7 +310,7 @@ impl BufferPool {
 
     /// Write a page to the disk given its physical page ID.
     fn write_page_to_disk(&self, page: Page, id: PhysicalPageID) {
-        let path = format!("{}/{}.dat", id.table, id.column_index);
+        let path = format!("{}/{}/{}.dat", self.directory, id.table_identifier, id.column_index);
 
         let line_to_seek = id.page_index * CELLS_PER_PAGE;
         let byte_to_seek = line_to_seek * 8;
@@ -275,17 +366,18 @@ impl BufferPool {
 
                 // Next, let's update the page map
                 let mut page_map_lock = self.page_map.write().unwrap();
-                page_map_lock[&global_page_index] = i;
+                page_map_lock.entry(global_page_index).and_modify(|iden| *iden = i);
 
                 // Finally, return the index of the frame that now holds this page
                 return i;
             }
+            drop(frame);
         }
 
         // At this point, we failed to get an empty frame (and there will never be an empty frame again)
         // For this reason, we need to check for a frame that we can evict
         for i in 0..BP_NUM_FRAMES {
-            if Arc::strong_count(&self.frames[i]) == 1 {
+            if Arc::strong_count(&self.frames[i]) - 64 == 0 {
                 // The frame in question is only being used by the buffer pool so we can safely evict it
                 // First, get a write lock on it
                 let mut frame = self.frames[i].write().unwrap();
@@ -310,7 +402,7 @@ impl BufferPool {
                 frame.id = Some(global_page_index);
 
                 // Next, let's update the page map with the newly retrieved and loaded page
-                page_map_lock[&global_page_index] = i;
+                page_map_lock.entry(global_page_index).and_modify(|iden| *iden = i);
 
                 // Finally, return the index of the frame that now holds this page
                 return i;
@@ -323,10 +415,12 @@ impl BufferPool {
         let mut frame: RwLockWriteGuard<Frame>;
 
         loop {
-            if Arc::strong_count(&self.frames[random_frame_index]) == 1 {
+            if Arc::strong_count(&self.frames[random_frame_index]) - 64 == 0 {
                 // We can now evict the randomly chosen frame!
                 frame = self.frames[random_frame_index].write().unwrap();
                 break;
+            } else {
+                //println!("[DEBUG] The strong count on this frame is {:?}", Arc::strong_count(&self.frames[random_frame_index]));
             }
             continue;
         }
@@ -354,7 +448,7 @@ impl BufferPool {
         frame.id = Some(global_page_index);
 
         // Next, let's update the page map with the newly retrieved and loaded page
-        page_map_lock[&global_page_index] = random_frame_index;
+        page_map_lock.entry(global_page_index).and_modify(|iden| *iden = random_frame_index);
 
         // Finally, return the index of the frame that now holds this page
         return random_frame_index;
@@ -408,26 +502,40 @@ impl BufferPool {
     /// Determine the next available page index for a column given its index and the
     /// table it belongs to. This will access the table's header (metadata) file on disk. In the future,
     /// this may be done entirely in memory and only persisted to disk upon shutdown.
-    fn next_page_index(&self, table_name: String, column_index: usize) -> usize {
-        unimplemented!()
+    fn next_page_index(&self, table_id: usize, column_index: usize) -> usize {
+        let path = format!("{}/{}/{}.hdr", self.directory, table_id, column_index);
+
+        let serialized_header = std::fs::read_to_string(path).unwrap();
+        let header: ColumnHeader = serde_json::from_str(&serialized_header).unwrap();
+        header.next_page_index
     }
 
     /// Update the next available page index for a column on disk
-    fn update_page_index(&self, table_name: String, column_index: usize, new_id: usize) {
-        unimplemented!()
+    fn update_page_index(&self, table_id: usize, column_index: usize, new_id: usize) {
+        let path = format!("{}/{}/{}.hdr", self.directory, table_id, column_index);
+        let new_header = ColumnHeader { next_page_index: new_id };
+
+        let serialized_header= serde_json::to_string(&new_header).unwrap();
+
+        let mut hdr_file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap();
+
+        hdr_file.write(serialized_header.as_bytes());
     }
 
     /// Allocate an entirely new page. Returns the index physical page ID
     /// for this newly allocated page.
-    pub fn allocate_page(&mut self, table_name: String, column_index: usize) -> PhysicalPageID {
+    pub fn allocate_page(&mut self, table_id: usize, column_index: usize) -> PhysicalPageID {
         // Since we're allocating this page, it clearly doesn't exist in memory OR on
         // the disk, so we need to add it.
 
         // We have the table name and column index - all we need to know is the page index to
         // create the physical page ID. However, we can't just initialize a new one without writing
         // it to the disk first. Otherwise, we can't use functions like `write_page`
-        let page_index = self.next_page_index(table_name, column_index);
-        let id = PhysicalPageID::new(table_name, column_index, page_index);
+        let page_index = self.next_page_index(table_id, column_index);
+        let id = PhysicalPageID::new(table_id, column_index, page_index);
 
         // Next, write an empty page to the right column file
         self.write_page_to_disk(Page::new(), id);
@@ -438,7 +546,7 @@ impl BufferPool {
 
         // Before we finish here, make sure to update the next available page index
         // This will write to the header file on disk
-        self.update_page_index(table_name, column_index, page_index + 1);
+        self.update_page_index(table_id, column_index, page_index + 1);
 
         // At this point, we have allocated a new page for the requested table and column. This page
         // exists on the disk (although it's empty) and is probably also in the buffer pool at this point.
@@ -446,8 +554,8 @@ impl BufferPool {
     }
 
     /// Create _several_ NEW pages.
-    pub fn allocate_pages(&mut self, table_name: String, count: usize) -> Vec<PhysicalPageID> {
-        (0..count).map(|i| self.allocate_page(table_name, i)).collect()
+    pub fn allocate_pages(&mut self, table_id: usize, count: usize) -> Vec<PhysicalPageID> {
+        (0..count).map(|i| self.allocate_page(table_id, i)).collect()
     }
 
     /// Write a value given an offset on a page.
@@ -469,7 +577,7 @@ impl BufferPool {
         let mut page = self.request_page(page_id);
 
         // Next, write the data
-        let offset = page.write_next(value).unwrap();
+        let offset = page.write_next(value)?;
 
         // Finally, write the page back and return
         self.write_page(page, page_id);
