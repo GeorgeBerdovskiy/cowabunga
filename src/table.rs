@@ -1,12 +1,20 @@
 use pyo3::prelude::*;
 use std::collections::{BTreeMap, HashSet};
+use std::fmt::format;
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::hash::Hash;
+use std::io::Write;
 use std::{collections::HashMap, marker::PhantomData};
 use std::sync::{Arc, Mutex};
 use std::ops::Bound::Included;
+use std::io::Read;
 
 use crate::constants::*;
 use crate::bufferpool::*;
 use crate::errors::DatabaseError;
+
+use serde::{Serialize, Deserialize};
 
 /// Empty type representing **base** pages.
 #[derive(Clone, Copy)]
@@ -15,6 +23,11 @@ struct Base;
 /// Empty type representing **tail** pages.
 #[derive(Clone, Copy)]
 struct Tail;
+
+#[derive(Serialize, Deserialize)]
+struct LogicalPageSerializable {
+    columns: Vec<PhysicalPageID>
+}
 
 /// Represents a **logical** base or tail page, depending on the provided generic type argument.
 struct LogicalPage<T> {
@@ -102,6 +115,13 @@ impl LogicalPage<Tail> {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct PageRangeSerializable {
+    base_pages: Vec<LogicalPageSerializable>,
+    tail_pages: Vec<LogicalPageSerializable>,
+    next_base_page: usize
+}
+
 /// Represents a page range. Consists of a set of base pages (which should have a set maximum
 /// size) and a set of tail pages (which is unbounded).
 struct PageRange {
@@ -151,6 +171,7 @@ impl PageRange {
 
     /// Read an entire tail record given the page index and physical offset.
     pub fn read_tail_record(&self, page: usize, offset: Offset, projection: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
+        // println!("[DEBUG] Preparing to read tail record at page {:?} with offset {:?}", page, offset);
         self.tail_pages[page].read(offset, projection)
     }
 
@@ -207,6 +228,7 @@ type LID = i64;
 /// Represents the address of a record. We obtain this address from the page directory,
 /// which maps from RIDs to physical addresses.
 #[derive(Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize)]
 struct Address {
     /// Page range index.
     range: usize,
@@ -246,6 +268,9 @@ impl PyRecord {
 /// Represents a table and is exposed by PyO3.
 #[pyclass]
 pub struct Table {
+    /// Directory holding all the tables
+    directory: String,
+
     /// Name of the table.
     #[pyo3(get)]
     pub name: String,
@@ -283,7 +308,23 @@ pub struct Table {
     dead_rids: Vec<RID>
 }
 
+
+#[derive(Serialize, Deserialize)]
+struct TableMetadata {
+    name: String,
+    table_identifier: usize,
+    num_columns: usize,
+    key_column: usize,
+    next_rid: usize,
+    page_ranges: Vec<PageRangeSerializable>,
+    page_directory: HashMap<RID, Address>,
+    next_page_range: usize,
+    indexer: Indexer
+}
+
 /// Represents the indexer of a table.
+#[derive(Clone)]
+#[derive(Serialize, Deserialize)]
 struct Indexer {
     /// If enabled[i] is `false`, the index for column `i` is considered dropped.
     enabled: Vec<bool>,
@@ -370,27 +411,142 @@ impl Table {
     /// Create a new table given its name, number of columns, primary key column index, and shared
     /// buffer pool manager.
     #[new]
-    pub fn new(name: String, num_columns: usize, key_column: usize, buffer_pool_manager: &PyAny) -> Self {
+    pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, buffer_pool_manager: &PyAny) -> Self {
         let buffer_pool_manager = buffer_pool_manager.extract::<PyRef<BufferPool>>().unwrap();
         let buffer_pool_manager = Arc::new(Mutex::new(buffer_pool_manager.clone()));
         let table_identifier = buffer_pool_manager.lock().unwrap().register_table_name(&name);
 
-        Table {
-            name,
-            table_identifier,
-            num_columns,
-            key_column,
-            next_rid: 0,
+        // Create the table directory, every column file inside that table, and the header file for every column
+        match std::fs::create_dir(format!("{}/{}", directory, table_identifier)) {
+            Ok(_) => {
+                // This is a completely new table, which means we need to create all its associated files
+                for i in 0..num_columns + NUM_METADATA_COLS {
+                    OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(format!("{}/{}/{}.dat", directory, table_identifier, i))
+                        .unwrap();
+        
+                    let col_hdr = ColumnHeader {
+                        next_page_index: 0
+                    };
+        
+                    let col_hdr_serialized = serde_json::to_string(&col_hdr).unwrap();
+        
+                    let mut col_hdr_file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(format!("{}/{}/{}.hdr", directory, table_identifier, i))
+                        .unwrap();
+        
+                    col_hdr_file.write(col_hdr_serialized.as_bytes());
+                    println!("Done writign column {:?}", i);
+                }
+        
+                println!("Peraring to create the page ranges");
+                let page_ranges = vec![PageRange::new(table_identifier, num_columns + NUM_METADATA_COLS, buffer_pool_manager.clone())];
+        
+                println!("Done creating page ranges, preparing to return the tabl,e....");
+        
+                return Table {
+                    directory,
+                    name,
+                    table_identifier,
+                    num_columns,
+                    key_column,
+                    next_rid: 0,
+        
+                    // The columns are _ | _ | ... | INDIRECTION
+                    page_ranges: page_ranges,
+                    page_directory: HashMap::new(),
+                    next_page_range: 0,
+                    buffer_pool_manager,
+        
+                    indexer: Indexer::new(num_columns),
+                    dead_rids: vec![]
+                };
+            },
 
-            // The columns are _ | _ | ... | INDIRECTION
-            page_ranges: vec![PageRange::new(table_identifier, num_columns + NUM_METADATA_COLS, buffer_pool_manager.clone())],
-            page_directory: HashMap::new(),
-            next_page_range: 0,
-            buffer_pool_manager,
+            Err(_) => {
+                // Table files already exist - load from those disk
+                // Also disregard the `num_columns` and `key_column` arguments
+                let metadata_path = format!("{}/{}/table.hdr", directory, table_identifier);
+                let mut metadata_file = File::open(metadata_path).unwrap();
 
-            indexer: Indexer::new(num_columns),
-            dead_rids: vec![]
-        }
+                let mut metadata_string = String::new();
+                metadata_file.read_to_string(&mut metadata_string);
+
+                let metadata: TableMetadata = serde_json::from_str(&metadata_string).unwrap();
+            
+                return Table {
+                    directory,
+                    name,
+                    table_identifier: metadata.table_identifier,
+                    num_columns: metadata.num_columns,
+                    key_column: metadata.key_column,
+                    next_rid: metadata.next_rid,
+                    page_ranges: metadata.page_ranges.iter().map(|serialized_range| PageRange {
+                        table_identifier,
+                        base_pages: serialized_range.base_pages.iter().map(|serialized_base_page| LogicalPage {
+                            table_identifier,
+                            columns: serialized_base_page.columns.clone(),
+                            buffer_pool_manager: buffer_pool_manager.clone(),
+                            phantom: PhantomData::<Base>
+                        }).collect(),
+                        tail_pages: serialized_range.tail_pages.iter().map(|serialized_tail_page| LogicalPage {
+                            table_identifier,
+                            columns: serialized_tail_page.columns.clone(),
+                            buffer_pool_manager: buffer_pool_manager.clone(),
+                            phantom: PhantomData::<Tail>
+                        }).collect(),
+                        next_base_page: serialized_range.next_base_page,
+                        num_columns: metadata.num_columns + NUM_METADATA_COLS,
+                        buffer_pool_manager: buffer_pool_manager.clone()
+                    }).collect(),
+                    page_directory: metadata.page_directory,
+                    next_page_range: metadata.next_page_range,
+                    buffer_pool_manager,
+                    indexer: metadata.indexer,
+                    dead_rids: vec![]
+                };
+            }
+        };
+    }
+
+    /// Persist table metadata onto disk
+    pub fn persist(&self) {
+        // First, collect everything into the metadata struct
+        let metadata = TableMetadata {
+            name: self.name.clone(),
+            table_identifier: self.table_identifier,
+            num_columns: self.num_columns,
+            key_column: self.key_column,
+            next_rid: self.next_rid,
+            page_ranges: self.page_ranges.iter().map(|page_range| PageRangeSerializable {
+                base_pages: page_range.base_pages.iter().map(|base_page| LogicalPageSerializable {
+                    columns: base_page.columns.clone()
+                }).collect(),
+                tail_pages: page_range.tail_pages.iter().map(|tail_page| LogicalPageSerializable {
+                    columns: tail_page.columns.clone()
+                }).collect(),
+                next_base_page: page_range.next_base_page
+            }).collect(),
+            page_directory: self.page_directory.clone(),
+            next_page_range: self.next_page_range,
+            indexer: self.indexer.clone()
+        };
+
+        let serialized_metadata = serde_json::to_string(&metadata).unwrap();
+
+        let metadata_path = format!("{}/{}/table.hdr", self.directory, self.table_identifier);
+
+        let mut metadata_file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(metadata_path)
+            .unwrap();
+        
+        metadata_file.write(serialized_metadata.as_bytes());
     }
 
     /// Create a new **base record**.
@@ -636,8 +792,6 @@ impl Table {
         }
         Ok(results)
     }
-
-
 
     /// returns (true, RID) for base and (false, RID) for tail
     pub fn get_version(&self, rid: RID, mut tail_rid: RID, relative_version: i64) -> (bool, RID) {
