@@ -1269,6 +1269,10 @@ impl Table {
         let projection: &Vec<usize> = &vec![1; page_range.num_columns + 1];
         // Have a temp TSP that is set to the page ranges TSP value
         let mut temp_tsp: usize = page_range.TPS;
+        // Maps logical tail pages to rids
+        let mut tail_page_to_rids: HashMap<usize, Vec<RID>> = HashMap::new();
+        // Stores the new locical Base pages in a vector
+        let mut new_logical_base_pages: Vec<LogicalPage<Base>> = Vec::new();
 
         for page in base_pages {
             // TODO clarify this w george and nate
@@ -1277,6 +1281,7 @@ impl Table {
                 self.num_columns,
                 self.buffer_pool_manager,
             );
+            new_logical_base_pages.push(copied_base);
 
             for offset in 0..CELLS_PER_PAGE {
                 let mut record = page.read(offset, projection).unwrap();
@@ -1294,24 +1299,43 @@ impl Table {
                         temp_tsp = tail_rid;
                         page_range.TPS = temp_tsp;
                     }
+                    let physical_pages_index = tail_address.page;
 
-                    match self.page_ranges[tail_address.range].read_tail_record(
-                        tail_address.page,
-                        tail_address.offset,
-                        &projection,
-                    ) {
-                        Ok(mut tail_columns) => {
-                            tail_columns.pop();
-                            copied_base.insert(&tail_columns);
-                        }
-                        Err(_) => {
-                            // Do nothing for now
-                        }
-                    }
+                    // I am not sure, but I think that this checks if the physical pages index
+                    // is in the map, if not then adds a vector of one.
+                    // if it exists, then pushed it to the vector
+                    // Marcin - Checks if a logical tail page exists for this RID already
+                    tail_page_to_rids
+                        .entry(physical_pages_index)
+                        .or_insert_with(|| vec![tail_rid.clone()])
+                        .push(tail_rid);
                 }
             }
-            result.push(copied_base);
         }
-        page_range.base_pages = result;
+        // This iterates through each logical tail page, and gets all its associated tail pages
+        for logical_tail_page in tail_page_to_rids.keys() {
+            let mut physical_pages: Vec<Page> = Vec::new();
+            for i in 0..self.num_columns + NUM_METADATA_COLS {
+                let page = self
+                    .buffer_pool_manager
+                    .lock()
+                    .unwrap()
+                    .request_page(PhysicalPageID {
+                        table_identifier: self.table_identifier,
+                        column_index: i,
+                        page_index: *logical_tail_page,
+                    });
+                physical_pages.push(page);
+            }
+            if let Some(rids) = tail_page_to_rids.get(logical_tail_page) {
+                for rid in rids {
+                    // Now that I am working with RID, what do I need to do?
+                    // - I need to copy all the values in the base page
+                    // First I get the RID of the base page
+                    // BUTTTT.... How do I know which copy does that correspond with?
+                    // Yeah, I do, because the Tail Rids can belong to different
+                }
+            }
+        }
     }
 }
