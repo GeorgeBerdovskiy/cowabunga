@@ -15,3 +15,5 @@ pub const BP_NULL_VALUE: i64 = i64::MIN;
 
 /// Internal special null value for bufferpool
 pub const BP_NUM_FRAMES: usize = 32;
+
+pub const THRESHOLD: usize = 50;

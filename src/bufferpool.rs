@@ -16,7 +16,7 @@ use rand::Rng;
 /// Contains a single field. Because all fields are 64 bit integers, we use `i64`.
 /// If a field has been written, it contains `Some(i64)`. Otherwise, it holds `None`.
 #[derive(Copy, Clone, Debug)]
-struct Cell(Option<i64>);
+pub struct Cell(Option<i64>);
 
 pub type PageIdentifier = usize;
 
@@ -77,6 +77,10 @@ impl Page {
         let mut cells = [Cell::empty(); CELLS_PER_PAGE];
         cells[511] = Cell::new(Some(0));
         Page { cells }
+    }
+
+    pub fn get_cells(&self) -> &[Cell; CELLS_PER_PAGE] {
+        &self.cells
     }
 
     /// Create a page from an array of cells.
