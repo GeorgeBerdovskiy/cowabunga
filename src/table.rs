@@ -317,7 +317,7 @@ pub struct Table {
     dead_rids: Vec<RID>,
 
     /// Sender channel used to send merge requests.
-    merge_sender: Option<Sender<(Vec<LogicalPage<Base>>, Arc<AtomicUsize>)>>
+    merge_sender: Option<Sender<(Vec<LogicalPage<Base>>, Arc<AtomicUsize>, usize)>>
 }
 
 #[derive(Serialize, Deserialize)]
@@ -529,17 +529,32 @@ impl Table {
 
     /// Initialize internal merge thread.
     pub fn start_merge_thread(&mut self) {
-        let (tx, rx) = mpsc::channel::<(Vec<LogicalPage<Base>>, Arc<AtomicUsize>)>();
+        let (tx, rx) = mpsc::channel::<(Vec<LogicalPage<Base>>, Arc<AtomicUsize>, usize)>();
 
         let merge_thread = thread::spawn(move || {
             println!("[DEBUG] Started merge thread.");
             loop {
-                let requested_range_to_merge = match rx.recv() {
-                    Ok(value) => {
+                match rx.recv() {
+                    Ok((base_pages, tps, num_columns)) => {
                         println!("[DEBUG] Received page range to merge.");
                         //println!("  > Logical base pages - {:?}", value.0);
-                        println!("  > TPS - {:?}", value.1.load(std::sync::atomic::Ordering::Relaxed));
-                        value
+                        println!("  > TPS - {:?}", tps.load(std::sync::atomic::Ordering::Relaxed));
+                        println!(" > NUM COLUMNS - {:?}", num_columns);
+                        let mut result: Vec<LogicalPage<Base>>;
+
+                        // For getting the newest tail record values
+                        // NOTE - It's plus one because we don't need the indirection
+                        // The columns are... COL 0 | COL 1 | ... | BASE RID (+1) | INDIRECTION (+2)
+                        let projection: &Vec<usize> = &vec![1; num_columns + 1];
+
+                        // Have a temporary TSP that will be updated as we go to the greatest TPID
+                        let mut temp_tsp: usize = 0;
+
+                        // Maps logical tail pages to RIDs
+                        let mut tail_page_to_rids: HashMap<usize, Vec<RID>> = HashMap::new();
+
+                        // Stores the new locical base pages in a vector
+                        let mut new_logical_base_pages: Vec<LogicalPage<Base>> = Vec::new();
                     },
                     Err(_) => break
                 };
@@ -722,7 +737,11 @@ impl Table {
                 if true {
                     match &self.merge_sender {
                         Some(sender) => {
-                            sender.send((self.page_ranges[base_address.range].base_pages.clone(), self.page_ranges[base_address.range].tps.clone())).unwrap();
+                            sender.send((
+                                self.page_ranges[base_address.range].base_pages.clone(),
+                                self.page_ranges[base_address.range].tps.clone(),
+                                self.num_columns)
+                            ).unwrap();
                         },
                         None => panic!("[ERROR] Query called before merge thread initialized.")
                     }
