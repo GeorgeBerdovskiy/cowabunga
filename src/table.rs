@@ -5,10 +5,14 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::hash::Hash;
 use std::io::Write;
+use std::sync::atomic::AtomicUsize;
 use std::{collections::HashMap, marker::PhantomData};
 use std::sync::{Arc, Mutex};
 use std::ops::Bound::Included;
 use std::io::Read;
+use std::thread::{self, JoinHandle};
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
 
 use crate::constants::*;
 use crate::bufferpool::*;
@@ -17,11 +21,11 @@ use crate::errors::DatabaseError;
 use serde::{Serialize, Deserialize};
 
 /// Empty type representing **base** pages.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Base;
 
 /// Empty type representing **tail** pages.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Tail;
 
 #[derive(Serialize, Deserialize)]
@@ -30,6 +34,7 @@ struct LogicalPageSerializable {
 }
 
 /// Represents a **logical** base or tail page, depending on the provided generic type argument.
+#[derive(Clone, Debug)]
 struct LogicalPage<T> {
     /// Identifier of the table this logical page belongs to.
     table_identifier: usize,
@@ -119,7 +124,8 @@ impl LogicalPage<Tail> {
 struct PageRangeSerializable {
     base_pages: Vec<LogicalPageSerializable>,
     tail_pages: Vec<LogicalPageSerializable>,
-    next_base_page: usize
+    next_base_page: usize,
+    tps: usize
 }
 
 /// Represents a page range. Consists of a set of base pages (which should have a set maximum
@@ -130,7 +136,7 @@ struct PageRange {
 
     /// The set of base pages associated with this page range. Whenever we write to this vector,
     /// we ensure that its length doesn't exceed `BASE_PAGES_PER_RANGE` (defined in `constants.rs`).
-    base_pages: Vec<LogicalPage<Base>>,
+    pub base_pages: Vec<LogicalPage<Base>>,
 
     /// The set of tail pages associated with this page range. It's unbounded, so no checks
     /// on its length are necessary.
@@ -144,7 +150,9 @@ struct PageRange {
     num_columns: usize,
 
     /// Shared buffer pool manager.
-    buffer_pool_manager: Arc<Mutex<BufferPool>>
+    buffer_pool_manager: Arc<Mutex<BufferPool>>,
+
+    pub tps: Arc<AtomicUsize>
 }
 
 impl PageRange {
@@ -160,7 +168,8 @@ impl PageRange {
             tail_pages: vec![LogicalPage::<Tail>::new(table_identifier, num_columns, buffer_pool_manager.clone())],
             next_base_page: 0,
             num_columns,
-            buffer_pool_manager: buffer_pool_manager.clone()
+            buffer_pool_manager: buffer_pool_manager.clone(),
+            tps: Arc::new(AtomicUsize::new(0))
         }
     }
 
@@ -304,10 +313,12 @@ pub struct Table {
     indexer: Indexer,
 
     /// List of "dead" RIDs... in other words, RIDs belonging to deleted records. This
-    /// list tells the merge operation what addresses may be deallocated
-    dead_rids: Vec<RID>
-}
+    /// list tells the merge operation what addresses may be deallocated.
+    dead_rids: Vec<RID>,
 
+    /// Sender channel used to send merge requests.
+    merge_sender: Option<Sender<(Vec<LogicalPage<Base>>, Arc<AtomicUsize>)>>
+}
 
 #[derive(Serialize, Deserialize)]
 struct TableMetadata {
@@ -463,7 +474,8 @@ impl Table {
                     buffer_pool_manager,
         
                     indexer: Indexer::new(num_columns),
-                    dead_rids: vec![]
+                    dead_rids: vec![],
+                    merge_sender: None
                 };
             },
 
@@ -501,16 +513,40 @@ impl Table {
                         }).collect(),
                         next_base_page: serialized_range.next_base_page,
                         num_columns: metadata.num_columns + NUM_METADATA_COLS,
-                        buffer_pool_manager: buffer_pool_manager.clone()
+                        buffer_pool_manager: buffer_pool_manager.clone(),
+                        tps: Arc::new(AtomicUsize::new(serialized_range.tps))
                     }).collect(),
                     page_directory: metadata.page_directory,
                     next_page_range: metadata.next_page_range,
                     buffer_pool_manager,
                     indexer: metadata.indexer,
-                    dead_rids: vec![]
+                    dead_rids: vec![],
+                    merge_sender: None
                 };
             }
         };
+    }
+
+    /// Initialize internal merge thread.
+    pub fn start_merge_thread(&mut self) {
+        let (tx, rx) = mpsc::channel::<(Vec<LogicalPage<Base>>, Arc<AtomicUsize>)>();
+
+        let merge_thread = thread::spawn(move || {
+            println!("[DEBUG] Started merge thread.");
+            loop {
+                let requested_range_to_merge = match rx.recv() {
+                    Ok(value) => {
+                        println!("[DEBUG] Received page range to merge.");
+                        //println!("  > Logical base pages - {:?}", value.0);
+                        println!("  > TPS - {:?}", value.1.load(std::sync::atomic::Ordering::Relaxed));
+                        value
+                    },
+                    Err(_) => break
+                };
+            }
+        });
+
+        self.merge_sender = Some(tx);
     }
 
     /// Persist table metadata onto disk
@@ -529,7 +565,8 @@ impl Table {
                 tail_pages: page_range.tail_pages.iter().map(|tail_page| LogicalPageSerializable {
                     columns: tail_page.columns.clone()
                 }).collect(),
-                next_base_page: page_range.next_base_page
+                next_base_page: page_range.next_base_page,
+                tps: page_range.tps.load(std::sync::atomic::Ordering::Relaxed)
             }).collect(),
             page_directory: self.page_directory.clone(),
             next_page_range: self.next_page_range,
@@ -679,6 +716,17 @@ impl Table {
                 // At this point, `cumulative_columns` contains all of our changes and original data that wasn't updated
                 let indirection_or_base_rid = indirection.unwrap_or(base_rid as i64);
                 let (page, offset) = self.page_ranges[base_address.range].insert_tail(&cumulative_columns, Some(indirection_or_base_rid));
+
+                // TODO - Replace `true` with `should_merge`
+                println!("[DEBUG] Just inserted at page range {:?}", base_address.range);
+                if true {
+                    match &self.merge_sender {
+                        Some(sender) => {
+                            sender.send((self.page_ranges[base_address.range].base_pages.clone(), self.page_ranges[base_address.range].tps.clone())).unwrap();
+                        },
+                        None => panic!("[ERROR] Query called before merge thread initialized.")
+                    }
+                }
 
                 // Add the new RID to physical address mapping
                 self.page_directory.insert(self.next_rid, Address::new(base_address.range, page, offset));

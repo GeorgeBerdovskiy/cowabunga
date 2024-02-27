@@ -131,6 +131,7 @@ impl Page {
 }
 
 /// Represents a single buffer pool frame.
+#[derive(Debug)]
 pub struct Frame {
     /// Page data stored inside this frame.
     page: Option<Page>,
@@ -165,7 +166,7 @@ pub struct ColumnHeader {
 
 /// Represents the buffer pool manager. One instance of the buffer pool manager is
 /// shared by _all_ tables using `Arc<Mutex<>>`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[pyclass]
 pub struct BufferPool {
     /// Working directory.

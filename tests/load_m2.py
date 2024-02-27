@@ -24,7 +24,7 @@ grades_table = db.create_table('Grades', 5, 0)
 query = Query(grades_table)
 
 next_primary_key = 900000000
-num_queries = 1000000
+num_queries = 100000
 
 total_time_0 = process_time()
 for i in range(num_queries):
