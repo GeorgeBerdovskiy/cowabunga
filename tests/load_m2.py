@@ -41,7 +41,7 @@ total_time_1 = process_time()
 print(f"Success! Finished {num_queries} randomized insertions in... \t\t{total_time_1 - total_time_0}s")
 
 for i in range(num_queries):
-    print(f"> Query #{i}")
+    # print(f"> Query #{i}")
     query_choice = random.randint(0,3)
 
     if query_choice == 0:
