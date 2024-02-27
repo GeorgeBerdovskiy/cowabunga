@@ -27,6 +27,7 @@ class Database():
     """
     def create_table(self, name, num_columns, key_index):
         table = table_module.Table(self.directory, name, num_columns, key_index, self.bpm)
+        table.start_merge_thread()
         print("Done creating table, now appending it")
         self.tables.append(table)
         return table
@@ -42,5 +43,6 @@ class Database():
     """
     def get_table(self, name):
         table = table_module.Table(self.directory, name, 0, 0, self.bpm)
+        table.start_merge_thread()
         self.tables.append(table)
         return table
