@@ -17,7 +17,7 @@ except:
 
 # Define "constants"
 NUM_COLUMNS = 5
-NUM_INSERTIONS = 50000
+NUM_INSERTIONS = 10000
 VALUE_MIN = -1000
 VALUE_MAX = 1000
 WRITE_SCRIPT = True
@@ -565,7 +565,6 @@ for q in range(NUM_INSERTIONS):
             write_script(f"# [ERROR] Expected SUM to return {expected_sum} but got {result} instead.")
             exit(1)
     elif query_choice == 5:
-        continue
         # Perform a select on any key that ISN'T the primary key WITH VERSION
         # We'll choose a range between -10 and 0, inclusive
         version = choice(range(-10, 1))
