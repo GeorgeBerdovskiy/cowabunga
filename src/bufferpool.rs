@@ -488,6 +488,56 @@ impl BufferPool {
         }
     }
 
+    pub fn write_page_masked(&mut self, page: Page, id: PhysicalPageID) {
+        let mut modified_cells = [Cell::empty(); CELLS_PER_PAGE];
+
+        let mut i = 0;
+        for cell in page.cells {
+            if cell.value().is_none() || i == CELLS_PER_PAGE - 1 {
+                break;
+            }
+
+            modified_cells[i] = cell;
+            i += 1;
+        }
+
+        match self.read_page_map(id) {
+            Some(index) => {
+                // This page is already in the buffer pool - write to it
+                // TODO - Consider whether this may negatively affect other processes
+                let mut frame = self.frames[index].write().unwrap();
+
+                // TODO - Move this to a function
+                frame.dirty = true;
+
+                while i < CELLS_PER_PAGE {
+                    modified_cells[i].0 = frame.page.unwrap().cells[i].0;
+                    i += 1;
+                }
+
+                frame.page = Some(Page::from_data(modified_cells));
+            },
+
+            None => {
+                // This page isn't in the buffer pool yet - grab it and try again
+                let index = self.bring_page_into_pool(id);
+                
+                // TODO - Consider whether this may negatively affect other processes
+                let mut frame = self.frames[index].write().unwrap();
+
+                // TODO - Move this to a function
+                frame.dirty = true;
+                
+                while i < CELLS_PER_PAGE {
+                    modified_cells[i].0 = frame.page.unwrap().cells[i].0;
+                    i += 1;
+                }
+
+                frame.page = Some(Page::from_data(modified_cells));
+            }
+        }
+    }
+
     /// Write an entire page given its physical page ID. The page already exists on disk.
     pub fn write_page(&mut self, page: Page, id: PhysicalPageID) {
         match self.read_page_map(id) {

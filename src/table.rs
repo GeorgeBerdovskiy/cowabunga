@@ -574,8 +574,8 @@ impl Table {
                         tps,
                         page_directory
                     }) => {
-                        continue;
-                        println!("[DEBUG] New merge called !!!!");
+                        //continue;
+                        //println!("[DEBUG] New merge called !!!!");
                         let mut physical_base_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; base_pages.len()];
                         let mut physical_tail_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; tail_pages.len()];
                     
@@ -622,6 +622,13 @@ impl Table {
                             physical_bps[num_columns + NUM_METADATA_COLS - 1] = page;
                         }
 
+                        for tp_index in tail_page_to_rids.keys() {
+                            for i in 0..num_columns {
+                                let page = mvd_bpm.lock().unwrap().request_page(tail_pages[*tp_index].columns[i]);
+                                physical_tail_pages[*tp_index][i] = page;
+                            }
+                        }
+
                         // At this point, every logical base page has its indirection filled
                         // We also have a map from logical tail pages to the RIDs contained in them
                         // that _we are interested in_
@@ -637,11 +644,11 @@ impl Table {
                                         //let tail_addr = page_directory[&(tail_rid as usize)];
                                         let tail_addr = match page_directory.get(&(tail_rid as usize)) {
                                             Some(value) => {
-                                                println!("[OK] Got addr value!");
+                                                //println!("[OK] Got addr value!");
                                                 value
                                             },
                                             None => {
-                                                println!("[HMM] Failed to get tail rid from page directory");
+                                                //println!("[HMM] Failed to get tail rid from page directory");
                                                 // This record must have been deleted at some point
                                                 //println!(" [DEBUG] Tail RID {:?} was DELETED!", tail_rid);
                                                 continue;
@@ -651,18 +658,18 @@ impl Table {
                                         // value for this tail record / col thingy
                                         //println!("[DEBUG] Trying to access tail rid {:?} in tail pages!", tail_rid);
                                         let tail_val = physical_tail_pages[tail_addr.page][i].get_cells()[tail_addr.offset].value();
-                                        println!("[DEBUG] Value at that addr is {:?}", tail_val);
+                                        //println!("[DEBUG] Value at that addr is {:?}", tail_val);
                                         physical_bp[i].write(j, tail_val).expect("Failed to write to offset");
                                     }
                                 }
                             }
                         }
                         
-                        println!("------");
+                        /*println!("------");
                         println!("{:?}", mvd_bpm.lock().unwrap().request_page(base_pages[0].columns[0]));
                         println!("------");
                         println!("{:?}", physical_base_pages[0][0]);
-                        println!("------");
+                        println!("------");*/
 
                         // println!("[DEBUG] Merge done.");
                         // Next, for every logical base page...
@@ -682,7 +689,7 @@ impl Table {
                         for (logical_bp, corresp_phys_bps) in base_pages.iter().zip(physical_base_pages.iter()) {
                             // Note that we are NOT writing the indirection column
                             for i in 0..num_columns {
-                                mvd_bpm_locked.write_page(corresp_phys_bps[i], logical_bp.columns[i]);
+                                mvd_bpm_locked.write_page_masked(corresp_phys_bps[i], logical_bp.columns[i]);
                             }
                         }
 
@@ -878,7 +885,7 @@ impl Table {
                 //println!("[DEBUG] Just inserted at page range {:?}", base_address.range);
                 if self.page_ranges[base_address.range].num_updates >= THRESHOLD {
                     self.page_ranges[base_address.range].num_updates = 0;
-                    println!("[DEBUG] Hit threshold of {:?} to merge! Sending...", THRESHOLD);
+                    //println!("[DEBUG] Hit threshold of {:?} to merge! Sending...", THRESHOLD);
                     match &self.merge_sender {
                         Some(sender) => {
                             sender.send(MergeRequest::new(
@@ -893,7 +900,7 @@ impl Table {
                         None => panic!("[ERROR] Query called before merge thread initialized.")
                     }
                 } else {
-                    println!("[DEBUG] Not merging because num. updates is only {:?} while the threshold is {:?}", self.page_ranges[base_address.range].num_updates, THRESHOLD);
+                    //println!("[DEBUG] Not merging because num. updates is only {:?} while the threshold is {:?}", self.page_ranges[base_address.range].num_updates, THRESHOLD);
                 }
 
                 // Add the new RID to physical address mapping
