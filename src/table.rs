@@ -845,7 +845,9 @@ impl Table {
                         }
 
                         drop(mvd_bpm_locked);
-
+                        tps.swap(temp_tsp as usize, std::sync::atomic::Ordering::Relaxed);
+                        
+                        println!("Done merging !!!!!!!");
                         // Done with merge! Use the TPS AtomicU64 to update the TPS to the temp TPS and restart the loop
                     }
 

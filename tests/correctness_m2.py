@@ -17,7 +17,7 @@ except:
 
 # Define "constants"
 NUM_COLUMNS = 5
-NUM_INSERTIONS = 10000
+NUM_INSERTIONS = 20000
 VALUE_MIN = -1000
 VALUE_MAX = 1000
 WRITE_SCRIPT = True
@@ -71,7 +71,7 @@ def write_script(input: str):
     fp.write(f"{input}\n")
 
 for q in range(NUM_INSERTIONS):
-    print(f"[INFO] QUERY {q + 1} / {NUM_INSERTIONS}")
+    # print(f"[INFO] QUERY {q + 1} / {NUM_INSERTIONS}")
     query_choice = choice(range(7))
 
     if query_choice == 0:
@@ -365,7 +365,7 @@ grades_table = db.get_table('Grades')
 query = Query(grades_table)
 
 for q in range(NUM_INSERTIONS):
-    print(f"[INFO] QUERY {NUM_INSERTIONS + q + 1} / {NUM_INSERTIONS * 2}")
+    # print(f"[INFO] QUERY {NUM_INSERTIONS + q + 1} / {NUM_INSERTIONS * 2}")
     query_choice = choice(range(7))
 
     if query_choice == 0:
