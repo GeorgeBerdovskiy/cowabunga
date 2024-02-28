@@ -377,6 +377,7 @@ impl Indexer {
         }
     }
 
+    /// Adds a value to a column.
     pub fn add_column_index(&mut self, value: i64, column: usize, base_rid: RID) {
         if self.b_trees[column].contains_key(&value) {
             self.b_trees[column]
@@ -391,13 +392,7 @@ impl Indexer {
 
     /// Update the index of a column given a RID, the original value, and the new value. This will delete
     /// (original, RID) from the corresponding b-tree and add (update, RID) to the b-tree.
-    pub fn update_column_index(
-        &mut self,
-        original: i64,
-        update: i64,
-        column: usize,
-        base_rid: RID,
-    ) {
+    pub fn update_column_index(&mut self, original: i64, update: i64, column: usize, base_rid: RID) {
         // Delete the old pair
         self.b_trees[column]
             .get_mut(&original)
@@ -412,8 +407,7 @@ impl Indexer {
     /// that range of keys
     fn locate_range(&self, start_key: i64, end_key: i64, column: usize) -> Vec<RID> {
         let mut result = Vec::new();
-        for (_, value) in self.b_trees[column].range((Included(&start_key), Included(&end_key)))
-        {
+        for (_, value) in self.b_trees[column].range((Included(&start_key), Included(&end_key))) {
             result.extend(value);
         }
 
@@ -434,12 +428,20 @@ impl Indexer {
     }
 }
 
+/// Represents a merge request. Sent through the merge sender channel
+/// when a page range reaches some update threshold.
 struct MergeRequest {
+    /// Copy of logical base pages sent w/merge request
     base_pages: Vec<LogicalPage<Base>>,
+
+    /// Copy of logical tail pages sent w/merge request
     tail_pages: Vec<LogicalPage<Tail>>,
-    buffer_pool_manager: Arc<Mutex<BufferPool>>,
+
+    /// Current TPS value (atomic so we can swap it safely accross threads)
     tps: Arc<AtomicUsize>,
-    num_columns: usize,
+
+    /// Page directory (sent w/merge request due to some complications
+    /// with Rust ownership rules and threads)
     page_directory: HashMap<RID, Address>,
 }
 
@@ -447,17 +449,13 @@ impl MergeRequest {
     pub fn new(
         base_pages: &Vec<LogicalPage<Base>>,
         tail_pages: &Vec<LogicalPage<Tail>>,
-        buffer_pool_manager: &Arc<Mutex<BufferPool>>,
         tps: &Arc<AtomicUsize>,
-        num_columns: usize,
         page_directory: &HashMap<RID, Address>,
     ) -> Self {
         MergeRequest {
             base_pages: base_pages.clone(),
             tail_pages: tail_pages.clone(),
-            buffer_pool_manager: buffer_pool_manager.clone(),
             tps: tps.clone(),
-            num_columns: num_columns,
             page_directory: page_directory.clone(),
         }
     }
@@ -468,13 +466,7 @@ impl Table {
     /// Create a new table given its name, number of columns, primary key column index, and shared
     /// buffer pool manager.
     #[new]
-    pub fn new(
-        directory: String,
-        name: String,
-        num_columns: usize,
-        key_column: usize,
-        buffer_pool_manager: &PyAny,
-    ) -> Self {
+    pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, buffer_pool_manager: &PyAny) -> Self {
         let buffer_pool_manager = buffer_pool_manager.extract::<PyRef<BufferPool>>().unwrap();
         let buffer_pool_manager = Arc::new(Mutex::new(buffer_pool_manager.clone()));
         let table_identifier = buffer_pool_manager
@@ -511,7 +503,6 @@ impl Table {
                     num_columns + NUM_METADATA_COLS,
                     buffer_pool_manager.clone(),
                 )];
-
 
                 return Table {
                     directory,
@@ -592,36 +583,29 @@ impl Table {
         };
     }
 
-    /// Initialize internal merge thread.
+    /// Initializes the internal merge thread.
     pub fn start_merge_thread(&mut self) {
         let (tx, rx) = mpsc::channel::<MergeRequest>();
         let mvd_bpm = self.buffer_pool_manager.clone();
+        let num_columns = self.num_columns.clone();
 
-        let merge_thread = thread::spawn(move || {
+        thread::spawn(move || {
             loop {
                 match rx.recv() {
                     Ok(MergeRequest {
                         base_pages,
                         tail_pages,
-                        buffer_pool_manager,
-                        num_columns,
                         tps,
                         page_directory,
                     }) => {
-                        continue;
-                        let mut physical_base_pages =
-                            vec![
-                                vec![Page::new(); num_columns + NUM_METADATA_COLS];
-                                base_pages.len()
-                            ];
-                        let mut physical_tail_pages =
-                            vec![
-                                vec![Page::new(); num_columns + NUM_METADATA_COLS];
-                                tail_pages.len()
-                            ];
+                        // We'd like to collect relevant physical pages here only _once_
+                        let mut physical_base_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; base_pages.len()];
+                        let mut physical_tail_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; tail_pages.len()];
 
+                        // Maps tail page indices to the base RIDs they correspond to (that we are interested in)
                         let mut tail_page_to_rids: HashMap<usize, Vec<RID>> = HashMap::new();
 
+                        // Local copy of the TSP that we'll update as we go
                         let mut temp_tsp = 0;
 
                         for (logical_bp, physical_bps) in
@@ -639,14 +623,13 @@ impl Table {
                             for i in 0..page.get_cells().len() - 1 {
                                 let cell = page.get_cells()[i];
                                 if let Some(tail_rid) = cell.value() {
-                                    let tail_address =
-                                        match page_directory.get(&(tail_rid as usize)) {
-                                            Some(value) => value,
-                                            None => {
-                                                // This record must have been deleted at some point
-                                                continue;
-                                            }
-                                        };
+                                    let tail_address = match page_directory.get(&(tail_rid as usize)) {
+                                        Some(value) => value,
+                                        None => {
+                                            // This record must have been deleted at some point
+                                            continue;
+                                        }
+                                    };
 
                                     // Keep track of the largest merged tail RID
                                     if tail_rid > temp_tsp {
@@ -667,6 +650,7 @@ impl Table {
                             physical_bps[num_columns + NUM_METADATA_COLS - 1] = page;
                         }
 
+                        // Here we are basically grabbing copies of the tail record values we are interested in
                         for tp_index in tail_page_to_rids.keys() {
                             for i in 0..num_columns {
                                 let page = mvd_bpm
@@ -689,22 +673,23 @@ impl Table {
                                 for j in 0..indirection_page.get_cells().len() - 1 {
                                     let indir_cell = indirection_page.get_cells()[j];
                                     if let Some(tail_rid) = indir_cell.value() {
-                                        //let tail_addr = page_directory[&(tail_rid as usize)];
-                                        let tail_addr =
-                                            match page_directory.get(&(tail_rid as usize)) {
-                                                Some(value) => {
-                                                    value
-                                                }
-                                                None => {
-                                                    // This record must have been deleted at some point
-                                                    continue;
-                                                }
-                                            };
+                                        let tail_addr = match page_directory.get(&(tail_rid as usize)) {
+                                            Some(value) => {
+                                                value
+                                            },
 
-                                        // value for this tail record / col thingy
+                                            None => {
+                                                // This record must have been deleted at some point
+                                                continue;
+                                            }
+                                        };
+
+                                        // Value of this tail record
                                         let tail_val = physical_tail_pages[tail_addr.page][i]
                                             .get_cells()[tail_addr.offset]
                                             .value();
+
+                                        // Write copy
                                         physical_bp[i]
                                             .write(j, tail_val)
                                             .expect("Failed to write to offset");
@@ -712,18 +697,6 @@ impl Table {
                                 }
                             }
                         }
-
-
-                        // Next, for every logical base page...
-                        // - For every tail RID in the indirection column of this page...
-                        //   - Get the address of the tail record
-                        //   - From the address, get its logical page ID and offset
-                        //   - Zip an iterator over the logical tail page's columns and the base page's columns (except for the indirection one)
-                        //     and write the logical tail page's value into the logical base page's slot
-
-                        // Done! Now zip an iterator over the logical base pages and copy of logical base pages. For each one...
-                        // - Grab the physical ID
-                        // - Request to write that entire page (from the copy) to the physical ID
 
                         // Lock and unwrap ONCE to ensure nobody else messes around with it while we work on it (may not be needed)
                         let mut mvd_bpm_locked = mvd_bpm.lock().unwrap();
@@ -740,8 +713,6 @@ impl Table {
 
                         drop(mvd_bpm_locked);
                         tps.swap(temp_tsp as usize, std::sync::atomic::Ordering::Relaxed);
-                        
-                        // Done with merge! Use the TPS AtomicU64 to update the TPS to the temp TPS and restart the loop
                     }
 
                     Err(_) => {
@@ -866,13 +837,10 @@ impl Table {
     }
 
     /// Update an existing record (in other words, insert a **tail record**). Note that we are using the **cumulative** update scheme.
-    pub fn update(&mut self, key: i64, columns: Vec<Option<i64>>) -> PyResult<()> {
+    pub fn update(&mut self, key: i64, columns: Vec<Option<i64>>) -> bool {
         if columns.len() < self.num_columns {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Table has {} columns, but only {} were provided.",
-                self.num_columns,
-                columns.len()
-            )));
+            // Project specifies that we should return `false` when something goes wrong
+            return false;
         }
 
         let key_value = key;
@@ -881,18 +849,15 @@ impl Table {
             .locate_range(key_value, key_value, self.key_column);
 
         if matching_rids.len() == 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Record with identifier {} doesn't exist.",
-                key_value
-            )));
+            // Project specifies that we should return `false` when something goes wrong
+            return false;
         }
 
         let base_rid = matching_rids[0];
         let base_address = self.page_directory[&base_rid];
 
         // Since we're using the cumulative update scheme, we need to grab the remaining values first
-        let mut cumulative_columns: Vec<Option<i64>> =
-            vec![None; self.num_columns + NUM_METADATA_COLS];
+        let mut cumulative_columns: Vec<Option<i64>> = vec![None; self.num_columns + NUM_METADATA_COLS];
 
         // Grab the base page because we need to check the indirection column
         match self.page_ranges[base_address.range].read_base_record(
@@ -941,11 +906,9 @@ impl Table {
                         }
 
                         Err(_error) => {
-                            // We couldn't access the tail record for some reason. For now, return an error. Later, default
-                            // to using the base columns and generate a warning or something like that.
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Failed to retrieve tail record."
-                            )));
+                            // We couldn't access the tail record for some reason
+                            // Project specifies that we should return `false` when something goes wrong
+                            return false;
                         }
                     }
                 } else {
@@ -980,7 +943,6 @@ impl Table {
                 let (page, offset) = self.page_ranges[base_address.range]
                     .insert_tail(&cumulative_columns, Some(indirection_or_base_rid));
 
-                // TODO - Replace `true` with `should_merge`
                 if self.page_ranges[base_address.range].num_updates >= THRESHOLD {
                     self.page_ranges[base_address.range].num_updates = 0;
                     match &self.merge_sender {
@@ -989,16 +951,14 @@ impl Table {
                                 .send(MergeRequest::new(
                                     &self.page_ranges[base_address.range].base_pages.clone(),
                                     &self.page_ranges[base_address.range].tail_pages.clone(),
-                                    &self.buffer_pool_manager,
                                     &self.page_ranges[base_address.range].tps.clone(),
-                                    self.num_columns,
                                     &self.page_directory,
                                 ))
                                 .unwrap();
-                        }
+                        },
+
                         None => panic!("[ERROR] Query called before merge thread initialized."),
                     }
-                } else {
                 }
 
                 // Add the new RID to physical address mapping
@@ -1008,18 +968,18 @@ impl Table {
                 );
 
                 // Update the base record indirection column
-                self.page_ranges[base_address.range]
-                    .update_base_indirection(base_address, self.next_rid)
-                    .map_err(|_| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                            "Failed to update base record indirection column.",
-                        )
-                    })?;
+                let result = self.page_ranges[base_address.range]
+                    .update_base_indirection(base_address, self.next_rid);
+
+                if let Err(_error) = result {
+                    // Project specifies that we should return `false` when something goes wrong
+                    return false;
+                }
 
                 // Increment the RID for the next record
                 self.next_rid += 1;
 
-                Ok(())
+                return true;
             }
 
             Err(_) => panic!("[ERROR] Failed to grab base record."),
@@ -1081,13 +1041,7 @@ impl Table {
 
     /// Given the start and end of an (inclusive) range, find all entries with primary keys
     /// within that range and sum the column at `column_index`.
-    pub fn sum_version(
-        &self,
-        start_range: i64,
-        end_range: i64,
-        column_index: usize,
-        relative_version: i64,
-    ) -> PyResult<i64> {
+    pub fn sum_version(&self, start_range: i64, end_range: i64, column_index: usize, relative_version: i64) -> PyResult<i64> {
         let rids = self
             .indexer
             .locate_range(start_range, end_range, self.key_column);
@@ -1095,7 +1049,6 @@ impl Table {
         // One hot encoding 🔥🥵
         let mut projection = vec![0; self.num_columns];
         projection[column_index] = 1;
-        // projection.push(1);
 
         let mut sum = 0;
         for rid in rids {
@@ -1115,13 +1068,7 @@ impl Table {
         Ok(sum)
     }
 
-    pub fn select_version(
-        &mut self,
-        search_key: i64,
-        search_key_index: usize,
-        proj: Vec<usize>,
-        relative_version: i64,
-    ) -> PyResult<Vec<PyRecord>> {
+    pub fn select_version(&mut self, search_key: i64, search_key_index: usize, proj: Vec<usize>, relative_version: i64) -> PyResult<Vec<PyRecord>> {
         let rids = self
             .indexer
             .locate_range(search_key, search_key, search_key_index);
@@ -1131,12 +1078,13 @@ impl Table {
             match self.select_by_rid_version(rid, &proj, relative_version) {
                 Ok(column_values) => {
                     // Now, ensure we only include the requested projected columns
-                    if let Some(first_column_value) = column_values.get(0) {
+                    if let Some(_first_column_value) = column_values.get(0) {
                         let record_values: Vec<Option<i64>> =
                             column_values.into_iter().take(proj.len()).collect();
                         results.push(PyRecord::new(rid, search_key, record_values));
                     }
-                }
+                },
+
                 Err(_) => {
                     // Convert Rust error to Python error
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -1148,10 +1096,10 @@ impl Table {
         Ok(results)
     }
 
-    /// returns (true, RID) for base and (false, RID) for tail
+    /// Returns (true, RID) for base record and (false, RID) for tail record.
     pub fn get_version(&self, rid: RID, mut tail_rid: RID, relative_version: i64) -> (bool, RID) {
         let mut version = 0;
-        // TODO: this is set to 1 only for printing purposes.
+        // TODO - This is set to 1 only for printing purposes.
         let mut projected_columns: Vec<usize> = vec![0; self.num_columns + NUM_METADATA_COLS];
 
         // get indirection
@@ -1170,14 +1118,17 @@ impl Table {
                     tail_rid_indirection = tail_columns
                         [tail_columns.len() - 1 - INDIRECTION_REV_IDX]
                         .unwrap() as usize;
-                }
+                },
+
                 Err(_) => {
                     panic!("Error looping through tail rids for select_version");
                 }
             }
+
             if tail_rid_indirection == rid {
                 break;
             }
+
             tail_rid = tail_rid_indirection;
             version -= 1;
         }
@@ -1254,31 +1205,29 @@ impl Table {
                             // Prepare for the next iteration of this loop
                             tail_rid = prev_tail_rid;
                             tail_address = self.page_directory[&(tail_rid as usize)];
-                        }
+                        },
 
                         Err(_) => {
                             break;
                         }
                     }
                 }
-            }
+            },
+
             Err(_) => {
                 // It doesn't exist or another error occurred... that's fine!
                 return Ok(());
             }
         }
+
         Ok(())
     }
 }
 
+// These methods aren't exposed to Python via PyO3
 impl Table {
-    /// Select one record given its RID and a column projection. Note that this method
-    /// is _not_ exposed via PyO3.
-    fn select_by_rid(
-        &self,
-        rid: RID,
-        proj: &Vec<usize>,
-    ) -> Result<Vec<Option<i64>>, DatabaseError> {
+    /// Select one record given its RID and a column projection.
+    fn select_by_rid(&self, rid: RID, proj: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
         let base_address = self.page_directory[&rid];
 
         let mut effective_proj = proj.clone();
@@ -1293,9 +1242,7 @@ impl Table {
         ) {
             Ok(base_columns) => {
                 // Check if we have a most recent tail record
-                if base_columns[base_columns.len() - 1].is_some()
-                    && base_columns[base_columns.len() - 1].unwrap() == rid as i64
-                {
+                if base_columns[base_columns.len() - 1].is_some() && base_columns[base_columns.len() - 1].unwrap() == rid as i64 {
                     // There is no record more recent than this one! Return it
                     let length = base_columns.len() - 1;
                     return Ok(base_columns.into_iter().take(length).collect());
@@ -1313,31 +1260,31 @@ impl Table {
                     Ok(tail_columns) => {
                         let length = tail_columns.len() - 1;
                         return Ok(tail_columns.into_iter().take(length).collect());
-                    }
+                    },
+
                     Err(_) => {
                         // Do nothing for now
                     }
                 }
-            }
+            },
+
             Err(_) => {
                 // Do nothing for now
             }
         }
+
         // Silently fail by returning an empty vector - replace with an error in the future
         Ok(vec![])
     }
-    fn select_by_rid_version(
-        &self,
-        rid: RID,
-        proj: &Vec<usize>,
-        relative_version: i64,
-    ) -> Result<Vec<Option<i64>>, DatabaseError> {
-        let base_address = self.page_directory[&rid];
-        let mut version = 0;
 
-        // GUARANTEE METADATA PRESENCE!
+    /// Select record by RID given a relative version.
+    fn select_by_rid_version(&self, rid: RID, proj: &Vec<usize>, relative_version: i64) -> Result<Vec<Option<i64>>, DatabaseError> {
+        let base_address = self.page_directory[&rid];
+
+        // We need to guarantee that the metadata (indirection) will be present
         let mut effective_proj = proj.clone();
         effective_proj.resize(self.num_columns + NUM_METADATA_COLS, 0);
+
         let onehot_indir_idx = self.num_columns + NUM_METADATA_COLS - 1 - INDIRECTION_REV_IDX;
         effective_proj[onehot_indir_idx] = 1;
 
@@ -1350,10 +1297,9 @@ impl Table {
             Ok(base_columns) => {
                 let col_length = base_columns.len() - NUM_METADATA_COLS;
                 let indir_idx = base_columns.len() - 1 - INDIRECTION_REV_IDX;
+
                 // Check if we have a most recent tail record
-                if base_columns[indir_idx].is_some()
-                    && base_columns[indir_idx].unwrap() == rid as i64
-                {
+                if base_columns[indir_idx].is_some() && base_columns[indir_idx].unwrap() == rid as i64 {
                     // There is no record more recent than this one! Return it
                     return Ok(base_columns.into_iter().take(col_length).collect());
                 }
@@ -1372,7 +1318,8 @@ impl Table {
                     ) {
                         Ok(cols) => {
                             return Ok(cols.into_iter().take(col_length).collect());
-                        }
+                        },
+
                         Err(_) => {
                             panic!("Couldn't get relative version.")
                         }
@@ -1385,17 +1332,20 @@ impl Table {
                     ) {
                         Ok(cols) => {
                             return Ok(cols.into_iter().take(col_length).collect());
-                        }
+                        },
+
                         Err(_) => {
                             panic!("Couldn't get relative version.")
                         }
                     }
                 }
-            }
+            },
+
             Err(_) => {
                 // Do nothing for now
             }
         }
+
         // Silently fail by returning an empty vector - replace with an error in the future
         Ok(vec![])
     }
