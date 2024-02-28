@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 use crate::bufferpool::*;
 use crate::constants::*;
 use crate::errors::DatabaseError;
-use crate::persistables::{ColumnPeristable, LogicalPagePersistable};
+use crate::persistables::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet, HashMap};
 use std::marker::PhantomData;
@@ -26,9 +26,6 @@ struct Tail;
 /// Represents a **logical** base or tail page, depending on the provided generic type argument.
 #[derive(Clone, Debug)]
 struct LogicalPage<T> {
-    /// Identifier of the table this logical page belongs to.
-    table_identifier: usize,
-
     /// Vector of **physical page identifiers** used by the buffer pool manager.
     columns: Vec<PhysicalPageID>,
 
@@ -42,29 +39,20 @@ struct LogicalPage<T> {
 /// Methods for all logical pages.
 impl<T> LogicalPage<T> {
     /// Create a new logical page with `num_columns` columns and a shared buffer pool manager.
-    pub fn new(
-        table_identifier: usize,
-        num_columns: usize,
-        buffer_pool_manager: Arc<Mutex<BufferPool>>,
-    ) -> LogicalPage<T> {
+    pub fn new(table_id: usize, num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> LogicalPage<T> {
         LogicalPage {
-            table_identifier,
             columns: buffer_pool_manager
                 .clone()
                 .lock()
                 .unwrap()
-                .allocate_pages(table_identifier, num_columns),
+                .allocate_pages(table_id, num_columns),
             buffer_pool_manager,
             phantom: PhantomData::<T>,
         }
     }
 
     /// Read from every column in this logical page given an offset.
-    pub fn read(
-        &self,
-        offset: Offset,
-        projection: &Vec<usize>,
-    ) -> Result<Vec<Option<i64>>, DatabaseError> {
+    pub fn read(&self, offset: Offset, projection: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
         let mut result = Vec::new();
 
         for i in 0..projection.len() {
@@ -107,29 +95,17 @@ impl LogicalPage<Base> {
     }
 
     /// Updates the indirection column of a base record.
-    pub fn update_indirection(
-        &mut self,
-        offset: Offset,
-        new_rid: RID,
-    ) -> Result<(), DatabaseError> {
+    pub fn update_indirection(&mut self, offset: Offset, new_rid: RID) -> Result<(), DatabaseError> {
         // The columns are _ | _ | ... | INDIRECTION
         let indirection_column = self.columns[self.columns.len() - 1];
-        self.buffer_pool_manager.lock().unwrap().write_value(
-            indirection_column,
-            offset,
-            Some(new_rid as i64),
-        )
+        self.buffer_pool_manager.lock().unwrap().write_value(indirection_column, offset, Some(new_rid as i64))
     }
 }
 
 /// Methods for logical **tail** pages
 impl LogicalPage<Tail> {
     /// Insert a new **tail** record given a vector of columns.
-    pub fn insert(
-        &mut self,
-        columns: &Vec<Option<i64>>,
-        indirection: Option<i64>,
-    ) -> Result<Offset, DatabaseError> {
+    pub fn insert(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>) -> Result<Offset, DatabaseError> {
         let mut offset = 0;
 
         // Iterate over columns and write their values, excluding the last one for special handling
@@ -151,14 +127,6 @@ impl LogicalPage<Tail> {
 
         Ok(offset)
     }
-}
-
-#[derive(Serialize, Deserialize)]
-struct PageRangePersistable {
-    base_pages: Vec<LogicalPagePersistable>,
-    tail_pages: Vec<LogicalPagePersistable>,
-    next_base_page: usize,
-    tps: usize,
 }
 
 /// Represents a page range. Consists of a set of base pages (which should have a set maximum
@@ -192,11 +160,7 @@ struct PageRange {
 
 impl PageRange {
     /// Create a new page range given the number of columns and a shared buffer pool manager.
-    pub fn new(
-        table_identifier: usize,
-        num_columns: usize,
-        buffer_pool_manager: Arc<Mutex<BufferPool>>,
-    ) -> Self {
+    pub fn new(table_identifier: usize, num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> Self {
         let base_page_vec = (0..BASE_PAGES_PER_RANGE)
             .map(|_| LogicalPage::new(table_identifier, num_columns, buffer_pool_manager.clone()))
             .collect();
@@ -218,47 +182,30 @@ impl PageRange {
     }
 
     /// Read an entire base record given the page index and physical offset.
-    pub fn read_base_record(
-        &self,
-        page: usize,
-        offset: Offset,
-        projection: &Vec<usize>,
-    ) -> Result<Vec<Option<i64>>, DatabaseError> {
+    pub fn read_base_record(&self, page: usize, offset: Offset, projection: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
         self.base_pages[page].read(offset, projection)
     }
 
     /// Read an entire tail record given the page index and physical offset.
-    pub fn read_tail_record(
-        &self,
-        page: usize,
-        offset: Offset,
-        projection: &Vec<usize>,
-    ) -> Result<Vec<Option<i64>>, DatabaseError> {
+    pub fn read_tail_record(&self, page: usize, offset: Offset, projection: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
         self.tail_pages[page].read(offset, projection)
     }
 
     /// Update the indirection column of a base record given its address and the new RID.
-    pub fn update_base_indirection(
-        &mut self,
-        address: Address,
-        new_rid: RID,
-    ) -> Result<(), DatabaseError> {
+    pub fn update_base_indirection(&mut self, address: Address, new_rid: RID) -> Result<(), DatabaseError> {
         self.base_pages[address.page].update_indirection(address.offset, new_rid)
     }
 
     /// Insert a tail record into this page range. Returns the logical page index and physical offset.
-    pub fn insert_tail(
-        &mut self,
-        columns: &Vec<Option<i64>>,
-        indirection: Option<i64>,
-    ) -> (usize, Offset) {
+    pub fn insert_tail(&mut self, columns: &Vec<Option<i64>>, indirection: Option<i64>) -> (usize, Offset) {
         let next_tail_page = self.tail_pages.len() - 1;
 
         match self.tail_pages[next_tail_page].insert(&columns, indirection) {
             Ok(offset) => {
                 self.num_updates += 1;
                 (next_tail_page, offset)
-            }
+            },
+
             Err(_) => {
                 // Add a new tail page and try to insert again
                 self.tail_pages.push(LogicalPage::new(
@@ -275,10 +222,7 @@ impl PageRange {
 
     /// Insert a base record into this page range. Returns the logical page index and physical offset if successful
     /// and an error otherwise.
-    pub fn insert_base(
-        &mut self,
-        columns: &Vec<Option<i64>>,
-    ) -> Result<(usize, Offset), DatabaseError> {
+    pub fn insert_base(&mut self,columns: &Vec<Option<i64>>) -> Result<(usize, Offset), DatabaseError> {
         if self.next_base_page >= BASE_PAGES_PER_RANGE {
             return Err(DatabaseError::PageRangeFilled);
         }
@@ -304,19 +248,19 @@ impl PageRange {
 }
 
 /// Represents the _record_ identifier.
-type RID = usize;
+pub type RID = usize;
 
 /// Represents the _logical_ identifier.
-type LID = i64;
+pub type LID = i64;
 
 /// Represents the address of a record. We obtain this address from the page directory,
 /// which maps from RIDs to physical addresses.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct Address {
+pub struct Address {
     /// Page range index.
     range: usize,
 
-    /// Logical base page index.
+    /// Logical page index.
     page: usize,
 
     /// Physical page offset.
@@ -326,11 +270,7 @@ struct Address {
 impl Address {
     // Create a new base address.
     pub fn new(range: usize, page: usize, offset: usize) -> Self {
-        Address {
-            range,
-            page,
-            offset,
-        }
+        Address { range, page, offset }
     }
 }
 
@@ -398,22 +338,9 @@ pub struct Table {
     merge_sender: Option<Sender<MergeRequest>>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct TableMetadata {
-    name: String,
-    table_identifier: usize,
-    num_columns: usize,
-    key_column: usize,
-    next_rid: usize,
-    page_ranges: Vec<PageRangePersistable>,
-    page_directory: HashMap<RID, Address>,
-    next_page_range: usize,
-    indexer: Indexer,
-}
-
 /// Represents the indexer of a table.
 #[derive(Clone, Serialize, Deserialize)]
-struct Indexer {
+pub struct Indexer {
     /// If enabled[i] is `false`, the index for column `i` is considered dropped.
     enabled: Vec<bool>,
 
@@ -485,7 +412,7 @@ impl Indexer {
     /// that range of keys
     fn locate_range(&self, start_key: i64, end_key: i64, column: usize) -> Vec<RID> {
         let mut result = Vec::new();
-        for (&key, value) in self.b_trees[column].range((Included(&start_key), Included(&end_key)))
+        for (_, value) in self.b_trees[column].range((Included(&start_key), Included(&end_key)))
         {
             result.extend(value);
         }
@@ -576,7 +503,7 @@ impl Table {
                         .open(format!("{}/{}/{}.hdr", directory, table_identifier, i))
                         .unwrap();
 
-                    col_hdr_file.write(col_hdr_serialized.as_bytes());
+                    let _result = col_hdr_file.write(col_hdr_serialized.as_bytes());
                 }
 
                 let page_ranges = vec![PageRange::new(
@@ -613,7 +540,7 @@ impl Table {
                 let mut metadata_file = File::open(metadata_path).unwrap();
 
                 let mut metadata_string = String::new();
-                metadata_file.read_to_string(&mut metadata_string);
+                let _result = metadata_file.read_to_string(&mut metadata_string);
 
                 let metadata: TableMetadata = serde_json::from_str(&metadata_string).unwrap();
 
@@ -633,7 +560,6 @@ impl Table {
                                 .base_pages
                                 .iter()
                                 .map(|serialized_base_page| LogicalPage {
-                                    table_identifier,
                                     columns: serialized_base_page.columns.clone(),
                                     buffer_pool_manager: buffer_pool_manager.clone(),
                                     phantom: PhantomData::<Base>,
@@ -643,7 +569,6 @@ impl Table {
                                 .tail_pages
                                 .iter()
                                 .map(|serialized_tail_page| LogicalPage {
-                                    table_identifier,
                                     columns: serialized_tail_page.columns.clone(),
                                     buffer_pool_manager: buffer_pool_manager.clone(),
                                     phantom: PhantomData::<Tail>,
@@ -885,13 +810,11 @@ impl Table {
         // to signal that a value isn't updated. However, we want to require that all columns are
         // provided for _new_ records. For this reason, we wrap them inside `Some` here.
         let mut columns_wrapped: Vec<Option<i64>> = columns.iter().map(|val| Some(*val)).collect();
+
         // Preemtively add the RID of the tail record copy we will add later
         columns_wrapped.push(Some((self.next_rid) as i64));
 
         if columns.len() < self.num_columns {
-            /*return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Table has {} columns, but only {} were provided.", self.num_columns, columns.len()),
-            ));*/
             return false;
         }
 
@@ -902,9 +825,6 @@ impl Table {
         );
 
         if matching_rids.len() != 0 {
-            /*return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Record with identifier {} already exists.", columns[self.key_column]),
-            ));*/
             return false;
         }
 
@@ -922,14 +842,14 @@ impl Table {
                 self.next_rid += 1;
 
                 // Also add the tail record corresponding to this base record
-                self.update(
+                let _result = self.update(
                     columns_wrapped[self.key_column].unwrap(),
                     columns_wrapped.into_iter().take(self.num_columns).collect(),
                 );
 
                 // Ok(())
                 return true;
-            }
+            },
 
             Err(_) => {
                 // This page range is full - add new range
@@ -1020,7 +940,7 @@ impl Table {
                             }
                         }
 
-                        Err(error) => {
+                        Err(_error) => {
                             // We couldn't access the tail record for some reason. For now, return an error. Later, default
                             // to using the base columns and generate a warning or something like that.
                             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -1107,12 +1027,7 @@ impl Table {
     }
 
     /// Select the most recent version of a record given its primary key.
-    pub fn select(
-        &mut self,
-        search_key: i64,
-        search_key_index: usize,
-        projected_columns: Vec<usize>,
-    ) -> PyResult<Vec<PyRecord>> {
+    pub fn select(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<usize>) -> PyResult<Vec<PyRecord>> {
         let rids = self
             .indexer
             .locate_range(search_key, search_key, search_key_index);
@@ -1128,7 +1043,7 @@ impl Table {
                 Ok(row_vec) => {
                     results.push(PyRecord::new(rid, search_key, row_vec));
                 }
-                Err(db_err) => {
+                Err(_error) => {
                     // error not yet handled.
                     panic!("Couldn't select.")
                 }

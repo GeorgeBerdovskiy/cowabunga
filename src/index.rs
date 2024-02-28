@@ -12,7 +12,7 @@ impl HashMapIndex {
         let mut hashmap: HashMap<i64, Vec<usize>> = HashMap::new();
     }
 
-    // Add a RID associated with a value
+    /// Add an RID associated with a value
     pub fn add_hash(value: i64, RID: usize) {
         if !hashmap.contains(value) {
             let vector:Vec<usize> = [RID];
@@ -22,7 +22,7 @@ impl HashMapIndex {
         }
     }
 
-    // Remove a RID associated with a value
+    // Remove an RID associated with a value.
     pub fn delete_hash(value:i64, RID: usize) {
         if !hashmap.contains(value) {
             panic("Invalid value for delete hash, make sure the value was previously inserted into the index")

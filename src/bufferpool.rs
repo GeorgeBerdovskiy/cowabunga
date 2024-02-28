@@ -628,7 +628,7 @@ impl BufferPool {
     /// Read the value at index `offset` on the page at index `page`.
     pub fn read(&mut self, page_id: PhysicalPageID, offset: Offset) -> Result<Option<i64>, DatabaseError> {
         // First, grab the requested page
-        let mut page = self.request_page(page_id);
+        let page = self.request_page(page_id);
 
         // Then, return the value at the specified offset
         page.read(offset)

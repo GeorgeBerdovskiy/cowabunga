@@ -7,13 +7,11 @@ pub const CELLS_PER_PAGE: usize = 512;
 /// Number of metadata columns.
 pub const NUM_METADATA_COLS: usize = 1;
 
-/// 0-based index of INDIRECTION starting from the end of our columns
+/// Index (zero-based) of INDIRECTION column starting from the end of our columns
 pub const INDIRECTION_REV_IDX: usize = 0;
 
-/// Internal special null value for bufferpool
-pub const BP_NULL_VALUE: i64 = i64::MIN;
-
-/// Internal special null value for bufferpool
+/// Number of frames in the buffer pool.
 pub const BP_NUM_FRAMES: usize = 32;
 
+/// Merge threshold.
 pub const THRESHOLD: usize = 50;
