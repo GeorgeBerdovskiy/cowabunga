@@ -10,7 +10,7 @@
 Venv is Python's virtual environment. Python now mandates that packages either be installed globally by a package manager (not pip) or installed to a virtual environment with pip or some pip replacement. Venv is best suited for this use case, so to set up a virtual environment, you can use the following command.
 
 ```
-python3 -m venv venv
+python3 -m venv . venv
 ```
 
 Alternatively, if you want your `venv/` folder to not clutter up the directory, you can call `venv/` `./venv/` like the following example.
@@ -22,7 +22,7 @@ python3 -m venv .venv
 You can then activate the environment by running
 
 ```
-source venv/bin activate
+source venv/bin/activate
 
 # or
 source .venv/bin activate

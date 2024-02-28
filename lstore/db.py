@@ -1,10 +1,18 @@
 from cowabunga_rs import table_module, buffer_pool_module
+import shutil
 
 class Database():
     def __init__(self):
-        self.directory = "cowdat"
+        self.directory = None
         self.tables = []
-        self.bpm = buffer_pool_module.BufferPool()
+        self.bpm = None
+
+        try:
+            shutil.rmtree("./COWDAT")
+        except:
+            pass
+
+        self.open("COWDAT")
 
     # Not required for milestone1
     def open(self, path):
@@ -28,7 +36,6 @@ class Database():
     def create_table(self, name, num_columns, key_index):
         table = table_module.Table(self.directory, name, num_columns, key_index, self.bpm)
         table.start_merge_thread()
-        print("Done creating table, now appending it")
         self.tables.append(table)
         return table
 
