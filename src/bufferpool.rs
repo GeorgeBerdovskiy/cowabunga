@@ -435,8 +435,6 @@ impl BufferPool {
                 // We can now evict the randomly chosen frame!
                 frame = self.frames[random_frame_index].write().unwrap();
                 break;
-            } else {
-                //println!("[DEBUG] The strong count on this frame is {:?}", Arc::strong_count(&self.frames[random_frame_index]));
             }
             continue;
         }

@@ -245,7 +245,6 @@ impl PageRange {
         offset: Offset,
         projection: &Vec<usize>,
     ) -> Result<Vec<Option<i64>>, DatabaseError> {
-        // println!("[DEBUG] Preparing to read tail record at page {:?} with offset {:?}", page, offset);
         self.tail_pages[page].read(offset, projection)
     }
 
@@ -589,17 +588,14 @@ impl Table {
                         .unwrap();
 
                     col_hdr_file.write(col_hdr_serialized.as_bytes());
-                    //println!("Done writign column {:?}", i);
                 }
 
-                //println!("Peraring to create the page ranges");
                 let page_ranges = vec![PageRange::new(
                     table_identifier,
                     num_columns + NUM_METADATA_COLS,
                     buffer_pool_manager.clone(),
                 )];
 
-                //println!("Done creating page ranges, preparing to return the tabl,e....");
 
                 return Table {
                     directory,
@@ -688,7 +684,6 @@ impl Table {
         let mvd_bpm = self.buffer_pool_manager.clone();
 
         let merge_thread = thread::spawn(move || {
-            println!("[DEBUG] Started merge thread.");
             loop {
                 match rx.recv() {
                     Ok(MergeRequest {
@@ -700,7 +695,6 @@ impl Table {
                         page_directory,
                     }) => {
                         //continue;
-                        //println!("[DEBUG] New merge called !!!!");
                         let mut physical_base_pages =
                             vec![
                                 vec![Page::new(); num_columns + NUM_METADATA_COLS];
@@ -716,7 +710,6 @@ impl Table {
 
                         let mut temp_tsp = 0;
 
-                        //println!("  [DEBUG] Preparing to loop over base pages...");
                         for (logical_bp, physical_bps) in
                             base_pages.iter().zip(physical_base_pages.iter_mut())
                         {
@@ -732,13 +725,11 @@ impl Table {
                             for i in 0..page.get_cells().len() - 1 {
                                 let cell = page.get_cells()[i];
                                 if let Some(tail_rid) = cell.value() {
-                                    //println!("    [DEBUG] Tail RID is {:?}", tail_rid);
                                     let tail_address =
                                         match page_directory.get(&(tail_rid as usize)) {
                                             Some(value) => value,
                                             None => {
                                                 // This record must have been deleted at some point
-                                                //println!(" [DEBUG] Tail RID {:?} was DELETED!", tail_rid);
                                                 continue;
                                             }
                                         };
@@ -788,23 +779,18 @@ impl Table {
                                         let tail_addr =
                                             match page_directory.get(&(tail_rid as usize)) {
                                                 Some(value) => {
-                                                    //println!("[OK] Got addr value!");
                                                     value
                                                 }
                                                 None => {
-                                                    //println!("[HMM] Failed to get tail rid from page directory");
                                                     // This record must have been deleted at some point
-                                                    //println!(" [DEBUG] Tail RID {:?} was DELETED!", tail_rid);
                                                     continue;
                                                 }
                                             };
 
                                         // value for this tail record / col thingy
-                                        //println!("[DEBUG] Trying to access tail rid {:?} in tail pages!", tail_rid);
                                         let tail_val = physical_tail_pages[tail_addr.page][i]
                                             .get_cells()[tail_addr.offset]
                                             .value();
-                                        //println!("[DEBUG] Value at that addr is {:?}", tail_val);
                                         physical_bp[i]
                                             .write(j, tail_val)
                                             .expect("Failed to write to offset");
@@ -813,13 +799,7 @@ impl Table {
                             }
                         }
 
-                        /*println!("------");
-                        println!("{:?}", mvd_bpm.lock().unwrap().request_page(base_pages[0].columns[0]));
-                        println!("------");
-                        println!("{:?}", physical_base_pages[0][0]);
-                        println!("------");*/
 
-                        // println!("[DEBUG] Merge done.");
                         // Next, for every logical base page...
                         // - For every tail RID in the indirection column of this page...
                         //   - Get the address of the tail record
@@ -847,7 +827,6 @@ impl Table {
                         drop(mvd_bpm_locked);
                         tps.swap(temp_tsp as usize, std::sync::atomic::Ordering::Relaxed);
                         
-                        println!("Done merging !!!!!!!");
                         // Done with merge! Use the TPS AtomicU64 to update the TPS to the temp TPS and restart the loop
                     }
 
@@ -1092,10 +1071,8 @@ impl Table {
                     .insert_tail(&cumulative_columns, Some(indirection_or_base_rid));
 
                 // TODO - Replace `true` with `should_merge`
-                //println!("[DEBUG] Just inserted at page range {:?}", base_address.range);
                 if self.page_ranges[base_address.range].num_updates >= THRESHOLD {
                     self.page_ranges[base_address.range].num_updates = 0;
-                    //println!("[DEBUG] Hit threshold of {:?} to merge! Sending...", THRESHOLD);
                     match &self.merge_sender {
                         Some(sender) => {
                             sender
@@ -1112,7 +1089,6 @@ impl Table {
                         None => panic!("[ERROR] Query called before merge thread initialized."),
                     }
                 } else {
-                    //println!("[DEBUG] Not merging because num. updates is only {:?} while the threshold is {:?}", self.page_ranges[base_address.range].num_updates, THRESHOLD);
                 }
 
                 // Add the new RID to physical address mapping
