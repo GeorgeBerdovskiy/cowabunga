@@ -1,5 +1,5 @@
 /// The number of (logical) base pages per page range.
-pub const BASE_PAGES_PER_RANGE: usize = 16;
+pub const BASE_PAGES_PER_RANGE: usize = 8;
 
 /// Number of cells that can be stored in a page.
 pub const CELLS_PER_PAGE: usize = 512;
@@ -14,4 +14,4 @@ pub const INDIRECTION_REV_IDX: usize = 0;
 pub const BP_NUM_FRAMES: usize = 32;
 
 /// Merge threshold.
-pub const THRESHOLD: usize = 50;
+pub const THRESHOLD: usize = 1000;
