@@ -1,24 +1,22 @@
 use pyo3::{pyclass, pymethods};
 
-use serde::{Serialize, Deserialize};
 use crate::constants::*;
 use crate::errors::*;
-use crate::table;
-use std::hash::Hash;
+use crate::persistables::*;
+
+use serde::{Serialize, Deserialize};
+use rand::Rng;
+
 use std::path::Path;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::sync::{RwLock, Arc, RwLockWriteGuard};
-use std::collections::{HashSet, HashMap};
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Read, Write};
-
-use rand::Rng;
+use std::io::{Seek, SeekFrom, Read, Write};
 
 /// Contains a single field. Because all fields are 64 bit integers, we use `i64`.
 /// If a field has been written, it contains `Some(i64)`. Otherwise, it holds `None`.
 #[derive(Copy, Clone, Debug)]
 pub struct Cell(Option<i64>);
-
-pub type PageIdentifier = usize;
 
 /// Represents a physical page offset.
 pub type Offset = usize;
@@ -75,10 +73,11 @@ impl Page {
         // Create the array of emtpy cells and set the last slot to the index of
         // the next available cell (zero at first)
         let mut cells = [Cell::empty(); CELLS_PER_PAGE];
-        cells[511] = Cell::new(Some(0));
+        cells[CELLS_PER_PAGE - 1] = Cell::new(Some(0));
         Page { cells }
     }
 
+    /// Returns all the cells stored in this page.
     pub fn get_cells(&self) -> &[Cell; CELLS_PER_PAGE] {
         &self.cells
     }
@@ -151,6 +150,7 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// Create a new empty frame.
     pub fn new() -> Self {
         Frame {
             page: None,
@@ -159,13 +159,6 @@ impl Frame {
             id: None
         }
     }
-}
-
-/// Contains metadata for a single column
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ColumnHeader {
-    /// Index of the next available page (for writing) in the corresponding column file.
-    pub next_page_index: usize
 }
 
 /// Represents the buffer pool manager. One instance of the buffer pool manager is
@@ -183,18 +176,11 @@ pub struct BufferPool {
     /// doesn't contain a physical page ID, that means the buffer pool doesn't have it.
     page_map: Arc<RwLock<HashMap<PhysicalPageID, usize>>>,
 
-    /// Contains all the table names that have already been registered
+    /// Contains all the table names that have already been registered.
     table_identifiers: HashMap<String, usize>,
 
-    /// Next available table identifier
+    /// Next available table identifier.
     next_table_id: usize
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct BufferPoolMetadata {
-    page_map: HashMap<PhysicalPageID, usize>,
-    table_identifiers: HashMap<String, usize>,
-    next_table_id: usize,
 }
 
 #[pymethods]
@@ -203,8 +189,8 @@ impl BufferPool {
     #[new]
     pub fn new() -> Self {
         // Initialize the frames
-        let frame = Arc::new(RwLock::new(Frame::new()));
-        let frames = (0..BP_NUM_FRAMES).map(|_| Arc::clone(&frame)).collect();
+        let empty_frame = Arc::new(RwLock::new(Frame::new()));
+        let frames = (0..BP_NUM_FRAMES).map(|_| Arc::clone(&empty_frame)).collect();
 
         // TODO - Open the default directory
         BufferPool {
@@ -228,9 +214,10 @@ impl BufferPool {
             let mut metadata_file = File::open(metadata_path).unwrap();
 
             let mut metadata_string = String::new();
-            metadata_file.read_to_string(&mut metadata_string);
+            let _result = metadata_file.read_to_string(&mut metadata_string);
 
-            let metadata: BufferPoolMetadata = serde_json::from_str(&metadata_string).unwrap();
+            let metadata: BufferPoolPersistable = serde_json::from_str(&metadata_string).unwrap();
+
             self.page_map = Arc::new(RwLock::new(metadata.page_map));
             self.table_identifiers = metadata.table_identifiers;
             self.next_table_id = metadata.next_table_id;
@@ -239,15 +226,14 @@ impl BufferPool {
             std::fs::create_dir(path).unwrap();
         }
 
-        // At this point the directory definitely exists
-        // Set the directory path
+        // At this point the directory definitely exists so we can set the directory field
         self.directory = path.to_string();
     }
 
-    /// Persist buffer pool metadata 
+    /// Persist buffer pool metadata on close.
     pub fn persist(&self) {
-        // First, collect the metadata into `BufferPoolMetadata`
-        let metadata = BufferPoolMetadata {
+        // First, collect the metadata into `BufferPoolPersistable`
+        let metadata = BufferPoolPersistable {
             table_identifiers: self.table_identifiers.clone(),
             page_map: self.page_map.read().unwrap().clone(),
             next_table_id: self.next_table_id
@@ -256,17 +242,16 @@ impl BufferPool {
         // Next, generate the buffer pool header path
         let metadata_path = format!("{}/bp.hdr", self.directory);
 
-        // Next, serialize the metadata
+        // Next, write the data to disk
         let serialized_metadata = serde_json::to_string(&metadata).unwrap();
-
-        // Finally, write the metadata
         let mut metadata_file = OpenOptions::new()
             .write(true)
+            .truncate(true)
             .create(true)
             .open(metadata_path)
             .unwrap();
-        
-        metadata_file.write(serialized_metadata.as_bytes());
+
+        let _result = metadata_file.write(serialized_metadata.as_bytes());
 
         // Now write all the dirty frames
         for i in 0..BP_NUM_FRAMES {
@@ -309,7 +294,7 @@ impl BufferPool {
             .open(path)
             .unwrap();
 
-        file.seek(SeekFrom::Start(byte_to_seek as u64));
+        let _result = file.seek(SeekFrom::Start(byte_to_seek as u64));
 
         let mut page_buffer: [u8; 4096] = [0; 4096];
         file.read_exact(&mut page_buffer).unwrap();
@@ -319,8 +304,7 @@ impl BufferPool {
             std::mem::transmute(page_buffer)
         };
 
-        let mut page = page.map(|value| if value == i64::MIN { Cell::empty() } else { Cell::new(Some(value)) });
-
+        let page = page.map(|value| if value == i64::MIN { Cell::empty() } else { Cell::new(Some(value)) });
         Page::from_data(page)
     }
 
@@ -338,7 +322,7 @@ impl BufferPool {
             .open(path)
             .unwrap();
 
-        file.seek(SeekFrom::Start(byte_to_seek as u64));
+        let _result = file.seek(SeekFrom::Start(byte_to_seek as u64));
 
         let page_as_integers = page.cells.map(|value| match value.0 {
             Some(number) => number,
@@ -350,7 +334,7 @@ impl BufferPool {
             std::mem::transmute(page_as_integers)
         };
 
-        file.write(&page_buffer);
+        let _result = file.write(&page_buffer);
     }
 
     /// Get the index of a frame given the physical page ID or `None` if the buffer pool
@@ -369,12 +353,12 @@ impl BufferPool {
         // First, check if an empty frame exists
         for i in 0..BP_NUM_FRAMES {
             let mut frame = self.frames[i].write().unwrap();
+
             if frame.empty {
                 // We found one! We acquired a write lock on purpose to guarantee that nobody
                 // writes to it while we switch from a read to a write lock
                 let page = self.get_page_from_disk(global_page_index);
-                
-                // TODO - Move this to a function
+
                 frame.page = Some(page);
                 frame.empty = false;
                 frame.dirty = false;
@@ -387,6 +371,7 @@ impl BufferPool {
                 // Finally, return the index of the frame that now holds this page
                 return i;
             }
+
             drop(frame);
         }
 
@@ -410,8 +395,7 @@ impl BufferPool {
                 // Now we can safely overwrite this frame
                 // Let's start by grabbing the requested page from the disk
                 let page = self.get_page_from_disk(global_page_index);
-                
-                // TODO - Move this to a function
+
                 frame.page = Some(page);
                 frame.empty = false;
                 frame.dirty = false;
@@ -436,6 +420,7 @@ impl BufferPool {
                 frame = self.frames[random_frame_index].write().unwrap();
                 break;
             }
+
             continue;
         }
 
@@ -454,8 +439,7 @@ impl BufferPool {
         // Now we can safely overwrite this frame
         // Let's start by grabbing the requested page from the disk
         let page = self.get_page_from_disk(global_page_index);
-        
-        // TODO - Move this to a function
+
         frame.page = Some(page);
         frame.empty = false;
         frame.dirty = false;
@@ -486,6 +470,7 @@ impl BufferPool {
         }
     }
 
+    /// Write to a page but ignore `None` values and the last cell, which contains the next available slot.
     pub fn write_page_masked(&mut self, page: Page, id: PhysicalPageID) {
         let mut modified_cells = [Cell::empty(); CELLS_PER_PAGE];
 
@@ -502,10 +487,7 @@ impl BufferPool {
         match self.read_page_map(id) {
             Some(index) => {
                 // This page is already in the buffer pool - write to it
-                // TODO - Consider whether this may negatively affect other processes
                 let mut frame = self.frames[index].write().unwrap();
-
-                // TODO - Move this to a function
                 frame.dirty = true;
 
                 while i < CELLS_PER_PAGE {
@@ -519,11 +501,8 @@ impl BufferPool {
             None => {
                 // This page isn't in the buffer pool yet - grab it and try again
                 let index = self.bring_page_into_pool(id);
-                
-                // TODO - Consider whether this may negatively affect other processes
-                let mut frame = self.frames[index].write().unwrap();
 
-                // TODO - Move this to a function
+                let mut frame = self.frames[index].write().unwrap();
                 frame.dirty = true;
                 
                 while i < CELLS_PER_PAGE {
@@ -541,10 +520,8 @@ impl BufferPool {
         match self.read_page_map(id) {
             Some(index) => {
                 // This page is already in the buffer pool - write to it
-                // TODO - Consider whether this may negatively affect other processes
                 let mut frame = self.frames[index].write().unwrap();
 
-                // TODO - Move this to a function
                 frame.dirty = true;
                 frame.page = Some(page);
             },
@@ -552,11 +529,9 @@ impl BufferPool {
             None => {
                 // This page isn't in the buffer pool yet - grab it and try again
                 let index = self.bring_page_into_pool(id);
-                
-                // TODO - Consider whether this may negatively affect other processes
+
                 let mut frame = self.frames[index].write().unwrap();
 
-                // TODO - Move this to a function
                 frame.dirty = true;
                 frame.page = Some(page);
             }
@@ -565,28 +540,30 @@ impl BufferPool {
 
     /// Determine the next available page index for a column given its index and the
     /// table it belongs to. This will access the table's header (metadata) file on disk. In the future,
-    /// this may be done entirely in memory and only persisted to disk upon shutdown.
+    /// this should be done entirely in memory and only persisted to disk upon shutdown.
     fn next_page_index(&self, table_id: usize, column_index: usize) -> usize {
         let path = format!("{}/{}/{}.hdr", self.directory, table_id, column_index);
 
         let serialized_header = std::fs::read_to_string(path).unwrap();
-        let header: ColumnHeader = serde_json::from_str(&serialized_header).unwrap();
+        let header: ColumnPeristable = serde_json::from_str(&serialized_header).unwrap();
         header.next_page_index
     }
 
     /// Update the next available page index for a column on disk
     fn update_page_index(&self, table_id: usize, column_index: usize, new_id: usize) {
         let path = format!("{}/{}/{}.hdr", self.directory, table_id, column_index);
-        let new_header = ColumnHeader { next_page_index: new_id };
+        let new_header = ColumnPeristable { next_page_index: new_id };
 
         let serialized_header= serde_json::to_string(&new_header).unwrap();
 
         let mut hdr_file = OpenOptions::new()
             .write(true)
+            .truncate(true)
+            .create(true)
             .open(path)
             .unwrap();
 
-        hdr_file.write(serialized_header.as_bytes());
+        let _result = hdr_file.write(serialized_header.as_bytes());
     }
 
     /// Allocate an entirely new page. Returns the index physical page ID
@@ -617,7 +594,7 @@ impl BufferPool {
         return id;
     }
 
-    /// Create _several_ NEW pages.
+    /// Create _several_ entirely new pages.
     pub fn allocate_pages(&mut self, table_id: usize, count: usize) -> Vec<PhysicalPageID> {
         (0..count).map(|i| self.allocate_page(table_id, i)).collect()
     }
@@ -628,7 +605,7 @@ impl BufferPool {
         let mut page = self.request_page(page_id);
 
         // Next, write the data
-        page.write(offset, value);
+        page.write(offset, value)?;
 
         // Finally, write the page back and return
         self.write_page(page, page_id);
@@ -656,65 +633,4 @@ impl BufferPool {
         // Then, return the value at the specified offset
         page.read(offset)
     }
-    
-    /*pub fn locate_pool_frame(&self, tablename: String, column: usize, page_indexentifier: usize) -> io::Result<Arc<RwLock<Frame>>> {
-        let global_page_index = PhysicalPageID::new(tablename, column, page_indexentifier);
-        // Attempt to locate frame in hash map.
-        match self.read_pagemap(global_page_index) {
-            Some(frame_idx) => {
-                return Ok(self.frames[frame_idx].clone());
-            },
-            None => {
-                // need to *pull* Page into Frame. Maybe evict!
-                // don't need to clone here because it should already be.
-                return self.bring_page_into_pool(global_page_index);
-            }
-        }
-    }*/
-
-
-// TODO: these fns use the old "page" paradigm.
-
-    /*/// Create a new page and add it to the vector of pages. Returns the index of this page.
-    pub fn allocate_page(&mut self, ) -> PageIdentifier {
-        self.pages.push(Page::new());
-        self.pages.len() - 1
-    }
-
-    /// Create several pages and add them all to the pages vector. Return their indices in order.
-    pub fn allocate_pages(&mut self, count: usize) -> Vec<PageIdentifier> {
-        (0..count).map(|_| self.allocate_page()).collect()
-    }
-
-    /// Write a value to page at index `page` and offset `offset` on that page
-    pub fn write(&mut self, page: PageIdentifier, offset: Offset, value: Option<i64>) -> Result<(), DatabaseError> {
-        if page >= self.pages.len() {
-            return Err(DatabaseError::PhysicalPageOOB)
-        }
-
-        // Page index is in bounds - proceed to write
-        self.pages[page].write(offset, value).and_then(|_| Ok(()))
-    }
-
-    /// Write a value to the next available offset on the page at index `page`.
-    pub fn write_next(&mut self, page: PageIdentifier, value: Option<i64>) -> Result<Offset, DatabaseError> {
-        if page >= self.pages.len() {
-            // Page index out of bounds
-            return Err(DatabaseError::PhysicalPageOOB);
-        }
-
-        // Page index is in bounds - try writing
-        self.pages[page].write_next(value)
-    }
-
-    /// Read the value at index `offset` on the page at index `page`.
-    pub fn read(&mut self, page: PageIdentifier, offset: Offset) -> Result<Option<i64>, DatabaseError> {
-        if page >= self.pages.len() {
-            // Page index is out of bounds
-            return Err(DatabaseError::PhysicalPageOOB)
-        }
-
-        // Page index is in bounds - proceed to write
-        self.pages[page].read(offset)
-    }*/
 }

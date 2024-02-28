@@ -4,6 +4,7 @@ mod constants;
 mod bufferpool;
 mod table;
 mod errors;
+mod persistables;
 
 #[pymodule]
 fn buffer_pool_module(_py: Python, m: &PyModule) -> PyResult<()> {

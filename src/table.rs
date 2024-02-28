@@ -1,38 +1,27 @@
 use pyo3::prelude::*;
-use std::collections::{BTreeMap, HashSet};
-use std::fmt::format;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::hash::Hash;
-use std::io::Read;
-use std::io::Write;
-use std::ops::Add;
-use std::ops::Bound::Included;
-use std::sync::atomic::AtomicUsize;
-use std::sync::mpsc;
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::{collections::HashMap, marker::PhantomData};
 
 use crate::bufferpool::*;
 use crate::constants::*;
 use crate::errors::DatabaseError;
-
+use crate::persistables::{ColumnPeristable, LogicalPagePersistable};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet, HashMap};
+use std::marker::PhantomData;
+use std::fs::{OpenOptions, File};
+use std::io::{Read, Write};
+use std::ops::Bound::Included;
+use std::sync::atomic::AtomicUsize;
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-/// Empty type representing **base** pages.
+/// Zero sized struct representing **base** pages.
 #[derive(Clone, Copy, Debug)]
 struct Base;
 
-/// Empty type representing **tail** pages.
+/// Zero sized struct representing **tail** pages.
 #[derive(Clone, Copy, Debug)]
 struct Tail;
-
-#[derive(Serialize, Deserialize)]
-struct LogicalPageSerializable {
-    columns: Vec<PhysicalPageID>,
-}
 
 /// Represents a **logical** base or tail page, depending on the provided generic type argument.
 #[derive(Clone, Debug)]
@@ -165,9 +154,9 @@ impl LogicalPage<Tail> {
 }
 
 #[derive(Serialize, Deserialize)]
-struct PageRangeSerializable {
-    base_pages: Vec<LogicalPageSerializable>,
-    tail_pages: Vec<LogicalPageSerializable>,
+struct PageRangePersistable {
+    base_pages: Vec<LogicalPagePersistable>,
+    tail_pages: Vec<LogicalPagePersistable>,
     next_base_page: usize,
     tps: usize,
 }
@@ -416,7 +405,7 @@ struct TableMetadata {
     num_columns: usize,
     key_column: usize,
     next_rid: usize,
-    page_ranges: Vec<PageRangeSerializable>,
+    page_ranges: Vec<PageRangePersistable>,
     page_directory: HashMap<RID, Address>,
     next_page_range: usize,
     indexer: Indexer,
@@ -577,7 +566,7 @@ impl Table {
                         .open(format!("{}/{}/{}.dat", directory, table_identifier, i))
                         .unwrap();
 
-                    let col_hdr = ColumnHeader { next_page_index: 0 };
+                    let col_hdr = ColumnPeristable { next_page_index: 0 };
 
                     let col_hdr_serialized = serde_json::to_string(&col_hdr).unwrap();
 
@@ -694,7 +683,7 @@ impl Table {
                         tps,
                         page_directory,
                     }) => {
-                        //continue;
+                        continue;
                         let mut physical_base_pages =
                             vec![
                                 vec![Page::new(); num_columns + NUM_METADATA_COLS];
@@ -852,18 +841,18 @@ impl Table {
             page_ranges: self
                 .page_ranges
                 .iter()
-                .map(|page_range| PageRangeSerializable {
+                .map(|page_range| PageRangePersistable {
                     base_pages: page_range
                         .base_pages
                         .iter()
-                        .map(|base_page| LogicalPageSerializable {
+                        .map(|base_page| LogicalPagePersistable {
                             columns: base_page.columns.clone(),
                         })
                         .collect(),
                     tail_pages: page_range
                         .tail_pages
                         .iter()
-                        .map(|tail_page| LogicalPageSerializable {
+                        .map(|tail_page| LogicalPagePersistable {
                             columns: tail_page.columns.clone(),
                         })
                         .collect(),
@@ -882,6 +871,7 @@ impl Table {
 
         let mut metadata_file = OpenOptions::new()
             .write(true)
+            .truncate(true)
             .create(true)
             .open(metadata_path)
             .unwrap();

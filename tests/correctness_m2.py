@@ -71,7 +71,7 @@ def write_script(input: str):
     fp.write(f"{input}\n")
 
 for q in range(NUM_INSERTIONS):
-    # print(f"[INFO] QUERY {q + 1} / {NUM_INSERTIONS}")
+    print(f"[INFO] QUERY {q + 1} / {NUM_INSERTIONS}")
     query_choice = choice(range(7))
 
     if query_choice == 0:
@@ -271,7 +271,6 @@ for q in range(NUM_INSERTIONS):
             write_script(f"# [ERROR] Expected SUM to return {expected_sum} but got {result} instead.")
             exit(1)
     elif query_choice == 5:
-        continue
         # Perform a select on any key that ISN'T the primary key WITH VERSION
         # We'll choose a range between -10 and 0, inclusive
         version = choice(range(-10, 1))
@@ -365,7 +364,7 @@ grades_table = db.get_table('Grades')
 query = Query(grades_table)
 
 for q in range(NUM_INSERTIONS):
-    # print(f"[INFO] QUERY {NUM_INSERTIONS + q + 1} / {NUM_INSERTIONS * 2}")
+    print(f"[INFO] QUERY {NUM_INSERTIONS + q + 1} / {NUM_INSERTIONS * 2}")
     query_choice = choice(range(7))
 
     if query_choice == 0:
@@ -653,4 +652,3 @@ print(f"[INFO] Success! Ran _another_ {NUM_INSERTIONS} random queries without er
 
 # Close the generated script!
 fp.close()
-
