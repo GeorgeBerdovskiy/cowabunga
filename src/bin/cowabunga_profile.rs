@@ -1,8 +1,8 @@
-use pyo3::prelude::*;
+//use pyo3::prelude::*;
 use rand::prelude::*;
 
 use cowabunga_rs::table::*;
-use cowabunga_rs::bufferpool::*;
+//use cowabunga_rs::bufferpool::*;
 
 use std::collections::HashSet;
 
@@ -10,19 +10,15 @@ fn main() {
     println!("Hello from cowabunga_profile!");
 
 
-    let mut bpm = BufferPool::new();
-    bpm.set_directory("./COWA_PROFILE");
-
     println!("2 Hello from cowabunga_profile!");
 
-    let mut tbl = Table::new("./COWA_PROFILE".to_string(), "prof_tbl".to_string(), 8, 0, bpm);
-
-    let mut prim_keys: HashSet<i64> = HashSet::new();
-
-
-    let mut rng = rand::thread_rng();
+    let mut tbl = Table::new("./COWA_PROFILE".to_string(), "prof_tbl".to_string(), 8, 0);
 
     println!("3 Hello from cowabunga_profile!");
+
+    let mut prim_keys: HashSet<i64> = HashSet::new();
+    let mut rng = rand::thread_rng();
+
 
     for i in 0..250_000 {
         match rng.gen_range(0..3) {

@@ -15,6 +15,13 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use once_cell::sync::Lazy;
+
+static BPM: Lazy<BufferPool> = Lazy::new(|| {
+    // This block is run only once to initialize the instance of BufferPool
+    BufferPool::new()
+});
+
 /// Zero sized struct representing **base** pages.
 #[derive(Clone, Copy, Debug)]
 struct Base;
@@ -30,7 +37,7 @@ struct LogicalPage<T> {
     columns: Vec<PhysicalPageID>,
 
     /// Buffer pool manager shared by all tables.
-    buffer_pool_manager: Arc<Mutex<BufferPool>>,
+    buffer_pool_manager: &'static BufferPool,
 
     /// Phantom field for the generic type argument (required since none of the other fields actually use `T`).
     phantom: PhantomData<T>,
@@ -39,13 +46,9 @@ struct LogicalPage<T> {
 /// Methods for all logical pages.
 impl<T> LogicalPage<T> {
     /// Create a new logical page with `num_columns` columns and a shared buffer pool manager.
-    pub fn new(table_id: usize, num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> LogicalPage<T> {
+    pub fn new(table_id: usize, num_columns: usize, buffer_pool_manager: &'static BufferPool) -> LogicalPage<T> {
         LogicalPage {
-            columns: buffer_pool_manager
-                .clone()
-                .lock()
-                .unwrap()
-                .allocate_pages(table_id, num_columns),
+            columns: buffer_pool_manager.allocate_pages(table_id, num_columns),
             buffer_pool_manager,
             phantom: PhantomData::<T>,
         }
@@ -61,10 +64,7 @@ impl<T> LogicalPage<T> {
             }
 
             result.push(
-                self.buffer_pool_manager
-                    .lock()
-                    .unwrap()
-                    .read(self.columns[i], offset)?,
+                self.buffer_pool_manager.read(self.columns[i], offset)?,
             );
         }
 
@@ -82,10 +82,7 @@ impl LogicalPage<Base> {
         // This adds the user's columns, but _not_ the metadata columns
         for (user_column, column_value) in self.columns.iter().zip(columns.iter()) {
             offset = self
-                .buffer_pool_manager
-                .lock()
-                .unwrap()
-                .write_next_value(*user_column, *column_value)?;
+                .buffer_pool_manager.write_next_value(*user_column, *column_value)?;
         }
 
         // Write the indirection column, which is last
@@ -98,7 +95,7 @@ impl LogicalPage<Base> {
     pub fn update_indirection(&mut self, offset: Offset, new_rid: RID) -> Result<(), DatabaseError> {
         // The columns are _ | _ | ... | INDIRECTION
         let indirection_column = self.columns[self.columns.len() - 1];
-        self.buffer_pool_manager.lock().unwrap().write_value(indirection_column, offset, Some(new_rid as i64))
+        self.buffer_pool_manager.write_value(indirection_column, offset, Some(new_rid as i64))
     }
 }
 
@@ -113,16 +110,11 @@ impl LogicalPage<Tail> {
             .iter()
             .zip(self.columns.iter().take(self.columns.len() - 1))
         {
-            offset = self
-                .buffer_pool_manager
-                .lock()
-                .unwrap()
+            offset = self.buffer_pool_manager
                 .write_next_value(column_value, user_column)?;
         }
 
         self.buffer_pool_manager
-            .lock()
-            .unwrap()
             .write_next_value(self.columns[self.columns.len() - 1], indirection)?;
 
         Ok(offset)
@@ -151,7 +143,7 @@ struct PageRange {
     num_columns: usize,
 
     /// Shared buffer pool manager.
-    buffer_pool_manager: Arc<Mutex<BufferPool>>,
+    buffer_pool_manager: &'static BufferPool,
 
     num_updates: usize,
 
@@ -160,9 +152,9 @@ struct PageRange {
 
 impl PageRange {
     /// Create a new page range given the number of columns and a shared buffer pool manager.
-    pub fn new(table_identifier: usize, num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> Self {
+    pub fn new(table_identifier: usize, num_columns: usize, buffer_pool_manager: &'static BufferPool) -> Self {
         let base_page_vec = (0..BASE_PAGES_PER_RANGE)
-            .map(|_| LogicalPage::new(table_identifier, num_columns, buffer_pool_manager.clone()))
+            .map(|_| LogicalPage::new(table_identifier, num_columns, buffer_pool_manager))
             .collect();
 
         PageRange {
@@ -171,11 +163,11 @@ impl PageRange {
             tail_pages: vec![LogicalPage::<Tail>::new(
                 table_identifier,
                 num_columns,
-                buffer_pool_manager.clone(),
+                buffer_pool_manager,
             )],
             next_base_page: 0,
             num_columns,
-            buffer_pool_manager: buffer_pool_manager.clone(),
+            buffer_pool_manager,
             num_updates: 0,
             tps: Arc::new(AtomicUsize::new(0)),
         }
@@ -211,7 +203,7 @@ impl PageRange {
                 self.tail_pages.push(LogicalPage::new(
                     self.table_identifier,
                     self.num_columns,
-                    self.buffer_pool_manager.clone(),
+                    self.buffer_pool_manager,
                 ));
 
                 // Recursively insert which will have at most one level of recursion
@@ -237,7 +229,7 @@ impl PageRange {
                 self.base_pages.push(LogicalPage::new(
                     self.table_identifier,
                     self.num_columns,
-                    self.buffer_pool_manager.clone(),
+                    self.buffer_pool_manager,
                 ));
 
                 // Note that although this call is recursive, it will have a depth of at most one
@@ -325,7 +317,7 @@ pub struct Table {
     next_page_range: usize,
 
     /// Buffer pool manager shared by all tables.
-    buffer_pool_manager: Arc<Mutex<BufferPool>>,
+    buffer_pool_manager: &'static BufferPool,
 
     /// B-Tree indexes on all columns (except metadata).
     indexer: Indexer,
@@ -466,13 +458,18 @@ impl Table {
     /// Create a new table given its name, number of columns, primary key column index, and shared
     /// buffer pool manager.
     #[new]
-    pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, buffer_pool_manager: &PyAny) -> Self {
-        let buffer_pool_manager = buffer_pool_manager.extract::<PyRef<BufferPool>>().unwrap();
-        let buffer_pool_manager = Arc::new(Mutex::new(buffer_pool_manager.clone()));
-        let table_identifier = buffer_pool_manager
-            .lock()
-            .unwrap()
-            .register_table_name(&name);
+    //pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, buffer_pool_manager: &'static BufferPool)
+    pub fn new(directory: String, name: String, num_columns: usize, key_column: usize) -> Self {
+
+
+        println!("DEBUG: about to access BPM");
+
+        BPM.set_directory(&directory as &str);
+        println!("DEBUG: trying to register table");
+        // TODO problem here
+        let table_identifier = BPM.register_table_name(&name);
+
+        println!("DEBUG: set bpm dir");
 
         // Create the table directory, every column file inside that table, and the header file for every column
         match std::fs::create_dir(format!("{}/{}", directory, table_identifier)) {
@@ -501,9 +498,9 @@ impl Table {
                 let page_ranges = vec![PageRange::new(
                     table_identifier,
                     num_columns + NUM_METADATA_COLS,
-                    buffer_pool_manager.clone(),
+                    &BPM,
                 )];
-
+                let merge_sender = start_merge_thread(num_columns, &BPM);
                 return Table {
                     directory,
                     name,
@@ -516,11 +513,11 @@ impl Table {
                     page_ranges: page_ranges,
                     page_directory: HashMap::new(),
                     next_page_range: 0,
-                    buffer_pool_manager,
+                    buffer_pool_manager: &BPM,
 
                     indexer: Indexer::new(num_columns),
                     dead_rids: vec![],
-                    merge_sender: None,
+                    merge_sender,
                 };
             }
 
@@ -535,6 +532,7 @@ impl Table {
 
                 let metadata: TableMetadata = serde_json::from_str(&metadata_string).unwrap();
 
+                let merge_sender = start_merge_thread(metadata.num_columns, &BPM);
                 return Table {
                     directory,
                     name,
@@ -552,7 +550,7 @@ impl Table {
                                 .iter()
                                 .map(|serialized_base_page| LogicalPage {
                                     columns: serialized_base_page.columns.clone(),
-                                    buffer_pool_manager: buffer_pool_manager.clone(),
+                                    buffer_pool_manager: &BPM,
                                     phantom: PhantomData::<Base>,
                                 })
                                 .collect(),
@@ -561,169 +559,28 @@ impl Table {
                                 .iter()
                                 .map(|serialized_tail_page| LogicalPage {
                                     columns: serialized_tail_page.columns.clone(),
-                                    buffer_pool_manager: buffer_pool_manager.clone(),
+                                    buffer_pool_manager: &BPM,
                                     phantom: PhantomData::<Tail>,
                                 })
                                 .collect(),
                             next_base_page: serialized_range.next_base_page,
                             num_columns: metadata.num_columns + NUM_METADATA_COLS,
-                            buffer_pool_manager: buffer_pool_manager.clone(),
+                            buffer_pool_manager: &BPM,
                             num_updates: 0,
                             tps: Arc::new(AtomicUsize::new(serialized_range.tps)),
                         })
                         .collect(),
                     page_directory: metadata.page_directory,
                     next_page_range: metadata.next_page_range,
-                    buffer_pool_manager,
+                    buffer_pool_manager: &BPM,
                     indexer: metadata.indexer,
                     dead_rids: vec![],
-                    merge_sender: None,
+                    merge_sender,
                 };
             }
         };
     }
 
-    /// Initializes the internal merge thread.
-    pub fn start_merge_thread(&mut self) {
-        let (tx, rx) = mpsc::channel::<MergeRequest>();
-        let mvd_bpm = self.buffer_pool_manager.clone();
-        let num_columns = self.num_columns.clone();
-
-        thread::spawn(move || {
-            loop {
-                match rx.recv() {
-                    Ok(MergeRequest {
-                        base_pages,
-                        tail_pages,
-                        tps,
-                        page_directory,
-                    }) => {
-                        // We'd like to collect relevant physical pages here only _once_
-                        let mut physical_base_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; base_pages.len()];
-                        let mut physical_tail_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; tail_pages.len()];
-
-                        // Maps tail page indices to the base RIDs they correspond to (that we are interested in)
-                        let mut tail_page_to_rids: HashMap<usize, Vec<RID>> = HashMap::new();
-
-                        // Local copy of the TSP that we'll update as we go
-                        let mut temp_tsp = 0;
-
-                        for (logical_bp, physical_bps) in
-                            base_pages.iter().zip(physical_base_pages.iter_mut())
-                        {
-                            // Grab a copy of the indirection column associated with this logical base page
-                            let indirection_column_identifier =
-                                logical_bp.columns[num_columns + NUM_METADATA_COLS - 1];
-                            let page = mvd_bpm
-                                .lock()
-                                .unwrap()
-                                .request_page(indirection_column_identifier);
-
-                            // NOTE - We must skip the last cell as it contains the next available offset and NOT an RID
-                            for i in 0..page.get_cells().len() - 1 {
-                                let cell = page.get_cells()[i];
-                                if let Some(tail_rid) = cell.value() {
-                                    let tail_address = match page_directory.get(&(tail_rid as usize)) {
-                                        Some(value) => value,
-                                        None => {
-                                            // This record must have been deleted at some point
-                                            continue;
-                                        }
-                                    };
-
-                                    // Keep track of the largest merged tail RID
-                                    if tail_rid > temp_tsp {
-                                        temp_tsp = tail_rid;
-                                    }
-
-                                    // Index of the logical tail pages holding the _physical_
-                                    // pages we're interested in
-                                    let physical_pages_index = tail_address.page;
-
-                                    tail_page_to_rids
-                                        .entry(physical_pages_index)
-                                        .or_insert_with(|| vec![tail_rid.clone() as usize])
-                                        .push(tail_rid as usize);
-                                }
-                            }
-
-                            physical_bps[num_columns + NUM_METADATA_COLS - 1] = page;
-                        }
-
-                        // Here we are basically grabbing copies of the tail record values we are interested in
-                        for tp_index in tail_page_to_rids.keys() {
-                            for i in 0..num_columns {
-                                let page = mvd_bpm
-                                    .lock()
-                                    .unwrap()
-                                    .request_page(tail_pages[*tp_index].columns[i]);
-                                physical_tail_pages[*tp_index][i] = page;
-                            }
-                        }
-
-                        // At this point, every logical base page has its indirection filled
-                        // We also have a map from logical tail pages to the RIDs contained in them
-                        // that _we are interested in_
-
-                        for physical_bp in physical_base_pages.iter_mut() {
-                            let indirection_page = physical_bp[num_columns + NUM_METADATA_COLS - 1];
-
-                            // Skip the indirection column when writing
-                            for i in 0..num_columns {
-                                for j in 0..indirection_page.get_cells().len() - 1 {
-                                    let indir_cell = indirection_page.get_cells()[j];
-                                    if let Some(tail_rid) = indir_cell.value() {
-                                        let tail_addr = match page_directory.get(&(tail_rid as usize)) {
-                                            Some(value) => {
-                                                value
-                                            },
-
-                                            None => {
-                                                // This record must have been deleted at some point
-                                                continue;
-                                            }
-                                        };
-
-                                        // Value of this tail record
-                                        let tail_val = physical_tail_pages[tail_addr.page][i]
-                                            .get_cells()[tail_addr.offset]
-                                            .value();
-
-                                        // Write copy
-                                        physical_bp[i]
-                                            .write(j, tail_val)
-                                            .expect("Failed to write to offset");
-                                    }
-                                }
-                            }
-                        }
-
-                        // Lock and unwrap ONCE to ensure nobody else messes around with it while we work on it (may not be needed)
-                        let mut mvd_bpm_locked = mvd_bpm.lock().unwrap();
-
-                        for (logical_bp, corresp_phys_bps) in
-                            base_pages.iter().zip(physical_base_pages.iter())
-                        {
-                            // Note that we are NOT writing the indirection column
-                            for i in 0..num_columns {
-                                mvd_bpm_locked
-                                    .write_page_masked(corresp_phys_bps[i], logical_bp.columns[i]);
-                            }
-                        }
-
-                        drop(mvd_bpm_locked);
-                        tps.swap(temp_tsp as usize, std::sync::atomic::Ordering::Relaxed);
-                    }
-
-                    Err(_) => {
-                        break;
-                    }
-                }
-            }
-        });
-
-        self.merge_sender = Some(tx);
-    }
 
     /// Persist table metadata onto disk
     pub fn persist(&self) {
@@ -827,7 +684,7 @@ impl Table {
                 self.page_ranges.push(PageRange::new(
                     self.table_identifier,
                     self.num_columns + NUM_METADATA_COLS,
-                    self.buffer_pool_manager.clone(),
+                    self.buffer_pool_manager,
                 ));
                 self.next_page_range += 1;
 
@@ -1349,4 +1206,138 @@ impl Table {
         // Silently fail by returning an empty vector - replace with an error in the future
         Ok(vec![])
     }
+}
+
+/// Initializes the internal merge thread.
+pub fn start_merge_thread(num_columns: usize, bpm: &'static BufferPool) -> Option<Sender<MergeRequest>> {
+    let (tx, rx) = mpsc::channel::<MergeRequest>();
+
+    thread::spawn(move || {
+        loop {
+            match rx.recv() {
+                Ok(MergeRequest {
+                    base_pages,
+                    tail_pages,
+                    tps,
+                    page_directory,
+                }) => {
+                    // We'd like to collect relevant physical pages here only _once_
+                    let mut physical_base_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; base_pages.len()];
+                    let mut physical_tail_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; tail_pages.len()];
+
+                    // Maps tail page indices to the base RIDs they correspond to (that we are interested in)
+                    let mut tail_page_to_rids: HashMap<usize, Vec<RID>> = HashMap::new();
+
+                    // Local copy of the TSP that we'll update as we go
+                    let mut temp_tsp = 0;
+
+                    for (logical_bp, physical_bps) in
+                        base_pages.iter().zip(physical_base_pages.iter_mut())
+                    {
+                        // Grab a copy of the indirection column associated with this logical base page
+                        let indirection_column_identifier =
+                            logical_bp.columns[num_columns + NUM_METADATA_COLS - 1];
+                        let page = bpm
+                            .request_page(indirection_column_identifier);
+
+                        // NOTE - We must skip the last cell as it contains the next available offset and NOT an RID
+                        for i in 0..page.get_cells().len() - 1 {
+                            let cell = page.get_cells()[i];
+                            if let Some(tail_rid) = cell.value() {
+                                let tail_address = match page_directory.get(&(tail_rid as usize)) {
+                                    Some(value) => value,
+                                    None => {
+                                        // This record must have been deleted at some point
+                                        continue;
+                                    }
+                                };
+
+                                // Keep track of the largest merged tail RID
+                                if tail_rid > temp_tsp {
+                                    temp_tsp = tail_rid;
+                                }
+
+                                // Index of the logical tail pages holding the _physical_
+                                // pages we're interested in
+                                let physical_pages_index = tail_address.page;
+
+                                tail_page_to_rids
+                                    .entry(physical_pages_index)
+                                    .or_insert_with(|| vec![tail_rid.clone() as usize])
+                                    .push(tail_rid as usize);
+                            }
+                        }
+
+                        physical_bps[num_columns + NUM_METADATA_COLS - 1] = page;
+                    }
+
+                    // Here we are basically grabbing copies of the tail record values we are interested in
+                    for tp_index in tail_page_to_rids.keys() {
+                        for i in 0..num_columns {
+                            let page = bpm
+                                .request_page(tail_pages[*tp_index].columns[i]);
+                            physical_tail_pages[*tp_index][i] = page;
+                        }
+                    }
+
+                    // At this point, every logical base page has its indirection filled
+                    // We also have a map from logical tail pages to the RIDs contained in them
+                    // that _we are interested in_
+
+                    for physical_bp in physical_base_pages.iter_mut() {
+                        let indirection_page = physical_bp[num_columns + NUM_METADATA_COLS - 1];
+
+                        // Skip the indirection column when writing
+                        for i in 0..num_columns {
+                            for j in 0..indirection_page.get_cells().len() - 1 {
+                                let indir_cell = indirection_page.get_cells()[j];
+                                if let Some(tail_rid) = indir_cell.value() {
+                                    let tail_addr = match page_directory.get(&(tail_rid as usize)) {
+                                        Some(value) => {
+                                            value
+                                        },
+
+                                        None => {
+                                            // This record must have been deleted at some point
+                                            continue;
+                                        }
+                                    };
+
+                                    // Value of this tail record
+                                    let tail_val = physical_tail_pages[tail_addr.page][i]
+                                        .get_cells()[tail_addr.offset]
+                                        .value();
+
+                                    // Write copy
+                                    physical_bp[i]
+                                        .write(j, tail_val)
+                                        .expect("Failed to write to offset");
+                                }
+                            }
+                        }
+                    }
+
+                    // Lock and unwrap ONCE to ensure nobody else messes around with it while we work on it (may not be needed)
+
+                    for (logical_bp, corresp_phys_bps) in
+                        base_pages.iter().zip(physical_base_pages.iter())
+                    {
+                        // Note that we are NOT writing the indirection column
+                        for i in 0..num_columns {
+                            bpm.
+                                write_page_masked(corresp_phys_bps[i], logical_bp.columns[i]);
+                        }
+                    }
+
+                    tps.swap(temp_tsp as usize, std::sync::atomic::Ordering::SeqCst);
+                }
+
+                Err(_) => {
+                    break;
+                }
+            }
+        }
+    });
+
+    return Some(tx);
 }
