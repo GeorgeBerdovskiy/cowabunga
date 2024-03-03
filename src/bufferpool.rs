@@ -75,7 +75,7 @@ impl Page {
         // Create the array of emtpy cells and set the last slot to the index of
         // the next available cell (zero at first)
         let mut cells = [Cell::empty(); CELLS_PER_PAGE];
-        cells[511] = Cell::new(Some(0));
+        cells[CELLS_PER_PAGE - 1] = Cell::new(Some(0));
         Page { cells }
     }
 
@@ -84,7 +84,7 @@ impl Page {
     }
 
     /// Create a page from an array of cells.
-    pub fn from_data(cells: [Cell; 512]) -> Self {
+    pub fn from_data(cells: [Cell; CELLS_PER_PAGE]) -> Self {
         Page { cells }
     }
 
@@ -311,10 +311,10 @@ impl BufferPool {
 
         file.seek(SeekFrom::Start(byte_to_seek as u64));
 
-        let mut page_buffer: [u8; 4096] = [0; 4096];
+        let mut page_buffer: [u8; CELLS_PER_PAGE * 8] = [0; CELLS_PER_PAGE * 8];
         file.read_exact(&mut page_buffer).unwrap();
 
-        let page: [i64; 512] = unsafe {
+        let page: [i64; CELLS_PER_PAGE] = unsafe {
             // SAFETY - This assumes that the memory layouts of [u8; 4096] and [i64; 512] are the same
             std::mem::transmute(page_buffer)
         };
@@ -345,7 +345,7 @@ impl BufferPool {
             None => i64::MIN
         });
 
-        let page_buffer: [u8; 4096] = unsafe {
+        let page_buffer: [u8; CELLS_PER_PAGE * 8] = unsafe {
             // Safety: This assumes that the memory layout of [u8; 4096] and [i64; 512] is the same
             std::mem::transmute(page_as_integers)
         };

@@ -688,7 +688,7 @@ impl Table {
         let mvd_bpm = self.buffer_pool_manager.clone();
 
         let merge_thread = thread::spawn(move || {
-            println!("[DEBUG] Started merge thread.");
+            // println!("[DEBUG] Started merge thread.");
             loop {
                 match rx.recv() {
                     Ok(MergeRequest {
@@ -847,7 +847,7 @@ impl Table {
                         drop(mvd_bpm_locked);
                         tps.swap(temp_tsp as usize, std::sync::atomic::Ordering::Relaxed);
                         
-                        println!("Done merging !!!!!!!");
+                        // println!("Done merging !!!!!!!");
                         // Done with merge! Use the TPS AtomicU64 to update the TPS to the temp TPS and restart the loop
                     }
 
