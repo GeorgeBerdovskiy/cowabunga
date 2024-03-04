@@ -19,7 +19,6 @@ fn main() {
     let mut prim_keys: HashSet<i64> = HashSet::new();
     let mut rng = rand::thread_rng();
 
-
     for i in 0..250_000 {
         match rng.gen_range(0..3) {
 
@@ -63,6 +62,5 @@ fn main() {
 
         println!("{}/250k", i);
     }
-
 }
 

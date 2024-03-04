@@ -771,6 +771,7 @@ impl Table {
                 } else {
                     // TODO - Fix this (mixing indexes with iterators is probably not a good idea)
                     let mut i = 0;
+
                     // This is our first update, so columns that aren't updated should come from `base_columns`
                     for (update, (original, target)) in columns
                         .iter()
@@ -1221,6 +1222,8 @@ pub fn start_merge_thread(num_columns: usize, bpm: &'static BufferPool) -> Optio
                     tps,
                     page_directory,
                 }) => {
+                    continue;
+                    println!("[DEBUG] Merge started.");
                     // We'd like to collect relevant physical pages here only _once_
                     let mut physical_base_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; base_pages.len()];
                     let mut physical_tail_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; tail_pages.len()];

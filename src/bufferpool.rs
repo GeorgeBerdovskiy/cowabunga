@@ -387,7 +387,7 @@ impl BufferPool {
 
                 // Next, let's update the page map
                 let mut page_map_lock = self.page_map.write().unwrap();
-                page_map_lock.entry(global_page_index).and_modify(|iden| *iden = i);
+                page_map_lock.entry(global_page_index).or_insert(i);
 
                 // Finally, return the index of the frame that now holds this page
                 return i;
@@ -423,7 +423,7 @@ impl BufferPool {
                 frame.id = Some(global_page_index);
 
                 // Next, let's update the page map with the newly retrieved and loaded page
-                page_map_lock.entry(global_page_index).and_modify(|iden| *iden = i);
+                page_map_lock.entry(global_page_index).or_insert(i);
 
                 // Finally, return the index of the frame that now holds this page
                 return i;
@@ -467,7 +467,7 @@ impl BufferPool {
         frame.id = Some(global_page_index);
 
         // Next, let's update the page map with the newly retrieved and loaded page
-        page_map_lock.entry(global_page_index).and_modify(|iden| *iden = random_frame_index);
+        page_map_lock.entry(global_page_index).or_insert(random_frame_index);
 
         // Finally, return the index of the frame that now holds this page
         return random_frame_index;
