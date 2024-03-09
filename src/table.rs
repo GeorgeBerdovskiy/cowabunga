@@ -5,6 +5,7 @@ use crate::constants::*;
 use crate::errors::DatabaseError;
 use crate::persistables::*;
 use serde::{Deserialize, Serialize};
+use core::panic;
 use std::collections::{BTreeMap, HashSet, HashMap};
 use std::marker::PhantomData;
 use std::fs::{OpenOptions, File};
@@ -459,12 +460,10 @@ impl Table {
     /// buffer pool manager.
     #[new]
     //pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, buffer_pool_manager: &'static BufferPool)
-    pub fn new(directory: String, name: String, num_columns: usize, key_column: usize) -> Self {
-
-
+    pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, is_load: bool) -> Self {
         println!("DEBUG: about to access BPM");
 
-        BPM.set_directory(&directory as &str);
+        BPM.set_directory(is_load, &directory as &str);
         println!("DEBUG: trying to register table");
         // TODO problem here
         let table_identifier = BPM.register_table_name(&name);
@@ -521,7 +520,9 @@ impl Table {
                 };
             }
 
-            Err(_) => {
+            Err(error) => {
+                println!("{:?}", error);
+
                 // Table files already exist - load from those disk
                 // Also disregard the `num_columns` and `key_column` arguments
                 let metadata_path = format!("{}/{}/table.hdr", directory, table_identifier);
@@ -1231,7 +1232,7 @@ pub fn start_merge_thread(num_columns: usize, bpm: &'static BufferPool) -> Optio
                     // Maps tail page indices to the base RIDs they correspond to (that we are interested in)
                     let mut tail_page_to_rids: HashMap<usize, Vec<RID>> = HashMap::new();
 
-                    // Local copy of the TSP that we'll update as we go
+                    // Local copy of the TPS that we'll update as we go
                     let mut temp_tsp = 0;
 
                     for (logical_bp, physical_bps) in
@@ -1311,6 +1312,13 @@ pub fn start_merge_thread(num_columns: usize, bpm: &'static BufferPool) -> Optio
                                         .get_cells()[tail_addr.offset]
                                         .value();
 
+                                    if tail_val.is_none() {
+                                        println!("------");
+                                        panic!("WARNING - Trying to write a `None` value from tail record into base record.\nBase value to be replaced is {:?} @ i = {}, j = {}", physical_bp[i].get_cells()[j], i, j);
+                                        println!("{:?}", physical_tail_pages[tail_addr.page][i]);
+                                        println!("------")
+                                    }
+
                                     // Write copy
                                     physical_bp[i]
                                         .write(j, tail_val)
@@ -1343,4 +1351,9 @@ pub fn start_merge_thread(num_columns: usize, bpm: &'static BufferPool) -> Optio
     });
 
     return Some(tx);
+}
+
+#[pyfunction]
+pub fn persist_bpm() {
+    BPM.persist();
 }

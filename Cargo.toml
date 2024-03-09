@@ -8,9 +8,9 @@ edition = "2021"
 name = "cowabunga_rs"
 crate-type = ["rlib", "cdylib"]
 
-[[bin]]
-name = "cowabunga_profile"
-path = "src/bin/cowabunga_profile.rs"
+#[[bin]]
+#name = "cowabunga_profile"
+#path = "src/bin/cowabunga_profile.rs"
 
 [dependencies]
 pyo3 = { version = "0.19" }

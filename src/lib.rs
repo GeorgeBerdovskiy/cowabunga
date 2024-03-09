@@ -15,6 +15,7 @@ fn buffer_pool_module(_py: Python, m: &PyModule) -> PyResult<()> {
 #[pymodule]
 fn table_module(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<table::Table>()?;
+    m.add_function(wrap_pyfunction!(table::persist_bpm, m)?);
     Ok(())
 }
 
