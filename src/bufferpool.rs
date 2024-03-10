@@ -230,9 +230,6 @@ impl BufferPool {
 
             let metadata: BufferPoolPersistable = serde_json::from_str(&metadata_string).unwrap();
 
-            let mut bp_pagemap_wlock = self.page_map.write().unwrap();
-            *bp_pagemap_wlock = metadata.page_map;
-
             let mut tbl_id_wlock = self.table_identifiers.write().unwrap();
             *tbl_id_wlock = metadata.table_identifiers;
             self.next_table_id.store(metadata.next_table_id, Ordering::SeqCst);
@@ -250,9 +247,8 @@ impl BufferPool {
     pub fn persist(&self) {
         // First, collect the metadata into `BufferPoolPersistable`
         let metadata = BufferPoolPersistable {
-            table_identifiers:  HashMap::new(), // self.table_identifiers.read().unwrap().clone(),
-            page_map: self.page_map.read().unwrap().clone(),
-            next_table_id: 5 // self.next_table_id.load(Ordering::SeqCst),
+            table_identifiers:  self.table_identifiers.read().unwrap().clone(),
+            next_table_id: self.next_table_id.load(Ordering::SeqCst),
         };
 
         println!("{:?}", metadata);

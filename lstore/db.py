@@ -50,7 +50,6 @@ class Database():
     # Returns table with the passed name
     """
     def get_table(self, name):
-        table = table_module.Table(self.directory, name, 0, 0, self.bpm)
-        table.start_merge_thread()
+        table = table_module.Table(self.directory, name, 0, 0, True)
         self.tables.append(table)
         return table
