@@ -16,7 +16,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::sync::RwLock;
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering;
 use once_cell::sync::Lazy;
 
 static BPM: Lazy<BufferPool> = Lazy::new(|| {
@@ -322,11 +322,11 @@ pub struct Table {
     buffer_pool_manager: &'static BufferPool,
 
     /// B-Tree indexes on all columns (except metadata).
-    indexer: Indexer,
+    indexer: Arc<RwLock<Indexer>>,
 
     /// List of "dead" RIDs... in other words, RIDs belonging to deleted records. This
     /// list tells the merge operation what addresses may be deallocated.
-    dead_rids: Vec<RID>,
+    dead_rids: Arc<RwLock<Vec<RID>>>,
 
     /// Sender channel used to send merge requests.
     merge_sender: Option<Sender<MergeRequest>>,
@@ -515,8 +515,8 @@ impl Table {
                     next_page_range: AtomicUsize::new(0),
                     buffer_pool_manager: &BPM,
 
-                    indexer: Indexer::new(num_columns),
-                    dead_rids: vec![],
+                    indexer: Arc::new(RwLock::new(Indexer::new(num_columns))),
+                    dead_rids: Arc::new(RwLock::new(Vec::new())),
                     merge_sender,
                 };
             }
@@ -575,8 +575,8 @@ impl Table {
                     page_directory: Arc::new(RwLock::new(metadata.page_directory)),
                     next_page_range: AtomicUsize::new(metadata.next_page_range),
                     buffer_pool_manager: &BPM,
-                    indexer: metadata.indexer,
-                    dead_rids: vec![],
+                    indexer: Arc::new(RwLock::new(metadata.indexer)),
+                    dead_rids: Arc::new(RwLock::new(Vec::new())),
                     merge_sender,
                 };
             }
@@ -591,7 +591,7 @@ impl Table {
             table_identifier: self.table_identifier,
             num_columns: self.num_columns,
             key_column: self.key_column,
-            next_rid: self.next_rid.load(std::sync::atomic::Ordering::SeqCst),
+            next_rid: self.next_rid.load(Ordering::SeqCst),
             page_ranges: self
                 .page_ranges
                 .read()
@@ -613,12 +613,12 @@ impl Table {
                         })
                         .collect(),
                     next_base_page: page_range.next_base_page,
-                    tps: page_range.tps.load(std::sync::atomic::Ordering::SeqCst),
+                    tps: page_range.tps.load(Ordering::SeqCst),
                 })
                 .collect(),
             page_directory: self.page_directory.read().unwrap().clone(),
-            next_page_range: self.next_page_range.load(SeqCst),
-            indexer: self.indexer.clone(),
+            next_page_range: self.next_page_range.load(Ordering::SeqCst),
+            indexer: self.indexer.write().unwrap().clone(),
         };
 
         let serialized_metadata = serde_json::to_string(&metadata).unwrap();
@@ -643,13 +643,15 @@ impl Table {
         let mut columns_wrapped: Vec<Option<i64>> = columns.iter().map(|val| Some(*val)).collect();
 
         // Preemtively add the RID of the tail record copy we will add later
-        columns_wrapped.push(Some((self.next_rid.load(SeqCst)) as i64));
+        columns_wrapped.push(Some((self.next_rid.load(Ordering::SeqCst)) as i64));
 
         if columns.len() < self.num_columns {
             return false;
         }
 
-        let matching_rids = self.indexer.locate_range(
+        let mut indexer_wlock = self.indexer.write().unwrap();
+
+        let matching_rids = indexer_wlock.locate_range(
             columns[self.key_column],
             columns[self.key_column],
             self.key_column,
@@ -662,18 +664,18 @@ impl Table {
         let mut page_range_lock = self.page_ranges.write().unwrap();
         let mut page_directory_lock = self.page_directory.write().unwrap();
 
-        match page_range_lock[self.next_page_range.load(SeqCst)].insert_base(&columns_wrapped) {
+        match page_range_lock[self.next_page_range.load(Ordering::SeqCst)].insert_base(&columns_wrapped) {
             Ok((page, offset)) => {
                 // Add the new RID to physical address mapping
                 page_directory_lock.insert(
-                    self.next_rid.load(SeqCst),
-                    Address::new(self.next_page_range.load(SeqCst), page, offset),
+                    self.next_rid.load(Ordering::SeqCst),
+                    Address::new(self.next_page_range.load(Ordering::SeqCst), page, offset),
                 );
 
-                self.indexer.insert(&columns, self.next_rid.load(SeqCst));
+                indexer_wlock.insert(&columns, self.next_rid.load(Ordering::SeqCst));
 
                 // Increment the RID for the next record
-                self.next_rid.fetch_add(1, SeqCst);
+                self.next_rid.fetch_add(1, Ordering::SeqCst);
 
                 // Also add the tail record corresponding to this base record
                 let _result = self.update(
@@ -692,7 +694,7 @@ impl Table {
                     self.num_columns + NUM_METADATA_COLS,
                     self.buffer_pool_manager,
                 ));
-                self.next_page_range.fetch_add(1, SeqCst);
+                self.next_page_range.fetch_add(1, Ordering::SeqCst);
 
                 return self.insert(columns);
             }
@@ -707,8 +709,10 @@ impl Table {
         }
 
         let key_value = key;
-        let matching_rids = self
-            .indexer
+
+        let mut indexer_wlock = self.indexer.write().unwrap();
+
+        let matching_rids = indexer_wlock
             .locate_range(key_value, key_value, self.key_column);
 
         if matching_rids.len() == 0 {
@@ -759,7 +763,7 @@ impl Table {
                                     // This column is being updated, so use the updated value
                                     *target = *update;
 
-                                    self.indexer.update_column_index(
+                                    indexer_wlock.update_column_index(
                                         original.unwrap(),
                                         update.unwrap(),
                                         i,
@@ -793,7 +797,7 @@ impl Table {
                             // This column is being updated, so use the updated value
                             *target = *update;
 
-                            self.indexer.update_column_index(
+                            indexer_wlock.update_column_index(
                                 original.unwrap(),
                                 update.unwrap(),
                                 i,
@@ -830,13 +834,13 @@ impl Table {
 
                 // Add the new RID to physical address mapping
                 page_directory_lock.insert(
-                    self.next_rid.load(SeqCst),
+                    self.next_rid.load(Ordering::SeqCst),
                     Address::new(base_address.range, page, offset),
                 );
 
                 // Update the base record indirection column
                 let result = page_range_lock[base_address.range]
-                    .update_base_indirection(base_address, self.next_rid.load(SeqCst));
+                    .update_base_indirection(base_address, self.next_rid.load(Ordering::SeqCst));
 
                 if let Err(_error) = result {
                     // Project specifies that we should return `false` when something goes wrong
@@ -844,7 +848,7 @@ impl Table {
                 }
 
                 // Increment the RID for the next record
-                self.next_rid.fetch_add(1, SeqCst);
+                self.next_rid.fetch_add(1, Ordering::SeqCst);
 
                 return true;
             }
@@ -855,8 +859,10 @@ impl Table {
 
     /// Select the most recent version of a record given its primary key.
     pub fn select(&self, search_key: i64, search_key_index: usize, projected_columns: Vec<usize>) -> PyResult<Vec<PyRecord>> {
-        let rids = self
-            .indexer
+
+        let indexer_rlock = self.indexer.read().unwrap();
+
+        let rids = indexer_rlock
             .locate_range(search_key, search_key, search_key_index);
         let mut results: Vec<PyRecord> = Vec::new();
 
@@ -883,8 +889,9 @@ impl Table {
     /// Given the start and end of an (inclusive) range, find all entries with primary keys
     /// within that range and sum the column at `column_index`.
     pub fn sum(&self, start_range: i64, end_range: i64, column_index: usize) -> PyResult<i64> {
-        let rids = self
-            .indexer
+
+        let indexer_rlock = self.indexer.read().unwrap();
+        let rids = indexer_rlock
             .locate_range(start_range, end_range, self.key_column);
 
         // One hot encoding 🔥🥵
@@ -909,8 +916,9 @@ impl Table {
     /// Given the start and end of an (inclusive) range, find all entries with primary keys
     /// within that range and sum the column at `column_index`.
     pub fn sum_version(&self, start_range: i64, end_range: i64, column_index: usize, relative_version: i64) -> PyResult<i64> {
-        let rids = self
-            .indexer
+
+        let indexer_rlock = self.indexer.read().unwrap();
+        let rids = indexer_rlock
             .locate_range(start_range, end_range, self.key_column);
 
         // One hot encoding 🔥🥵
@@ -936,8 +944,9 @@ impl Table {
     }
 
     pub fn select_version(&self, search_key: i64, search_key_index: usize, proj: Vec<usize>, relative_version: i64) -> PyResult<Vec<PyRecord>> {
-        let rids = self
-            .indexer
+
+        let indexer_rlock = self.indexer.read().unwrap();
+        let rids = indexer_rlock
             .locate_range(search_key, search_key, search_key_index);
         let mut results: Vec<PyRecord> = Vec::new();
 
@@ -1009,8 +1018,10 @@ impl Table {
 
     pub fn delete(&self, primary_key: i64) -> PyResult<()> {
         // First, we need to get the RID corresponding to the base record with this primary key
-        let base_rid = self
-            .indexer
+
+        let mut indexer_wlock = self.indexer.write().unwrap();
+
+        let base_rid = indexer_wlock
             .locate_range(primary_key, primary_key, self.key_column);
 
         if base_rid.len() == 0 {
@@ -1032,11 +1043,13 @@ impl Table {
         ) {
             Ok(base_columns) => {
                 // Add the base record RID to the list of dead RIDs for removal
-                self.dead_rids.push(base_rid);
+                let mut dead_rid_wlock = self.dead_rids.write().unwrap();
+                dead_rid_wlock.push(base_rid);
 
                 // Remove the base record's values from the indexer
                 if let Some((_, elements)) = base_columns.split_last() {
-                    self.indexer.remove_from_index(elements.to_vec(), base_rid);
+                    // TODO indexer
+                    indexer_wlock.remove_from_index(elements.to_vec(), base_rid);
                 }
 
                 // Now that we've taken care of the base RID, let's also remove all the tail records
@@ -1061,14 +1074,15 @@ impl Table {
                     ) {
                         Ok(tail_columns) => {
                             // Add the last tail record's RID to the list of dead RIDs
-                            self.dead_rids.push(tail_rid as usize);
+                            dead_rid_wlock.push(tail_rid as usize);
 
                             // Calculate the RID of the previous tail record (or the base record)
                             let prev_tail_rid = tail_columns[tail_columns.len() - 1].unwrap();
 
                             // Drop the indirection column and remove all value - RID pairs from the indexer
+                            // TODO indexer
                             if let Some((_, elements)) = tail_columns.split_last() {
-                                self.indexer.remove_from_index(elements.to_vec(), base_rid);
+                                indexer_wlock.remove_from_index(elements.to_vec(), base_rid);
                             }
 
                             if prev_tail_rid == base_rid as i64 {
@@ -1086,6 +1100,7 @@ impl Table {
                         }
                     }
                 }
+                drop(dead_rid_wlock);
             },
 
             Err(_) => {
@@ -1361,7 +1376,7 @@ pub fn start_merge_thread(num_columns: usize, bpm: &'static BufferPool) -> Optio
                         }
                     }
 
-                    tps.swap(temp_tsp as usize, std::sync::atomic::Ordering::SeqCst);
+                    tps.swap(temp_tsp as usize, Ordering::SeqCst);
                 }
 
                 Err(_) => {

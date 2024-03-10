@@ -12,7 +12,7 @@ fn main() {
 
     println!("2 Hello from cowabunga_profile!");
 
-    let mut tbl = Table::new("./COWA_PROFILE".to_string(), "prof_tbl".to_string(), 8, 0, false);
+    let tbl = Table::new("./COWA_PROFILE".to_string(), "prof_tbl".to_string(), 8, 0, false);
 
     println!("3 Hello from cowabunga_profile!");
 
