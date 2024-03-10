@@ -15,7 +15,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-
+use std::sync::RwLock;
+use std::sync::atomic::Ordering::SeqCst;
 use once_cell::sync::Lazy;
 
 static BPM: Lazy<BufferPool> = Lazy::new(|| {
@@ -306,16 +307,16 @@ pub struct Table {
     key_column: usize,
 
     /// Next available RID.
-    next_rid: usize,
+    next_rid: AtomicUsize,
 
     /// Page ranges associated with this table. Note that it's expanded _dynamically_.
-    page_ranges: Vec<PageRange>,
+    page_ranges: Arc<RwLock<Vec<PageRange>>>,
 
     /// Page directory - maps from RIDs to base record addresses.
-    page_directory: HashMap<RID, Address>,
+    page_directory: Arc<RwLock<HashMap<RID, Address>>>,
 
     /// Index of the next available page range.
-    next_page_range: usize,
+    next_page_range: AtomicUsize,
 
     /// Buffer pool manager shared by all tables.
     buffer_pool_manager: &'static BufferPool,
@@ -506,12 +507,12 @@ impl Table {
                     table_identifier,
                     num_columns,
                     key_column,
-                    next_rid: 0,
+                    next_rid: AtomicUsize::new(0),
 
                     // The columns are _ | _ | ... | INDIRECTION
-                    page_ranges: page_ranges,
-                    page_directory: HashMap::new(),
-                    next_page_range: 0,
+                    page_ranges: Arc::new(RwLock::new(page_ranges)),
+                    page_directory: Arc::new(RwLock::new(HashMap::new())),
+                    next_page_range: AtomicUsize::new(0),
                     buffer_pool_manager: &BPM,
 
                     indexer: Indexer::new(num_columns),
@@ -540,8 +541,8 @@ impl Table {
                     table_identifier: metadata.table_identifier,
                     num_columns: metadata.num_columns,
                     key_column: metadata.key_column,
-                    next_rid: metadata.next_rid,
-                    page_ranges: metadata
+                    next_rid: AtomicUsize::new(metadata.next_rid),
+                    page_ranges: Arc::new(RwLock::new(metadata
                         .page_ranges
                         .iter()
                         .map(|serialized_range| PageRange {
@@ -570,9 +571,9 @@ impl Table {
                             num_updates: 0,
                             tps: Arc::new(AtomicUsize::new(serialized_range.tps)),
                         })
-                        .collect(),
-                    page_directory: metadata.page_directory,
-                    next_page_range: metadata.next_page_range,
+                        .collect())),
+                    page_directory: Arc::new(RwLock::new(metadata.page_directory)),
+                    next_page_range: AtomicUsize::new(metadata.next_page_range),
                     buffer_pool_manager: &BPM,
                     indexer: metadata.indexer,
                     dead_rids: vec![],
@@ -582,7 +583,6 @@ impl Table {
         };
     }
 
-
     /// Persist table metadata onto disk
     pub fn persist(&self) {
         // First, collect everything into the metadata struct
@@ -591,9 +591,11 @@ impl Table {
             table_identifier: self.table_identifier,
             num_columns: self.num_columns,
             key_column: self.key_column,
-            next_rid: self.next_rid,
+            next_rid: self.next_rid.load(std::sync::atomic::Ordering::SeqCst),
             page_ranges: self
                 .page_ranges
+                .read()
+                .unwrap()
                 .iter()
                 .map(|page_range| PageRangePersistable {
                     base_pages: page_range
@@ -611,11 +613,11 @@ impl Table {
                         })
                         .collect(),
                     next_base_page: page_range.next_base_page,
-                    tps: page_range.tps.load(std::sync::atomic::Ordering::Relaxed),
+                    tps: page_range.tps.load(std::sync::atomic::Ordering::SeqCst),
                 })
                 .collect(),
-            page_directory: self.page_directory.clone(),
-            next_page_range: self.next_page_range,
+            page_directory: self.page_directory.read().unwrap().clone(),
+            next_page_range: self.next_page_range.load(SeqCst),
             indexer: self.indexer.clone(),
         };
 
@@ -634,14 +636,14 @@ impl Table {
     }
 
     /// Create a new **base record**.
-    pub fn insert(&mut self, columns: Vec<i64>) -> bool {
+    pub fn insert(&self, columns: Vec<i64>) -> bool {
         // Some functions take a vector of optionals rather than integers because updates use `None`
         // to signal that a value isn't updated. However, we want to require that all columns are
         // provided for _new_ records. For this reason, we wrap them inside `Some` here.
         let mut columns_wrapped: Vec<Option<i64>> = columns.iter().map(|val| Some(*val)).collect();
 
         // Preemtively add the RID of the tail record copy we will add later
-        columns_wrapped.push(Some((self.next_rid) as i64));
+        columns_wrapped.push(Some((self.next_rid.load(SeqCst)) as i64));
 
         if columns.len() < self.num_columns {
             return false;
@@ -657,18 +659,21 @@ impl Table {
             return false;
         }
 
-        match self.page_ranges[self.next_page_range].insert_base(&columns_wrapped) {
+        let mut page_range_lock = self.page_ranges.write().unwrap();
+        let mut page_directory_lock = self.page_directory.write().unwrap();
+
+        match page_range_lock[self.next_page_range.load(SeqCst)].insert_base(&columns_wrapped) {
             Ok((page, offset)) => {
                 // Add the new RID to physical address mapping
-                self.page_directory.insert(
-                    self.next_rid,
-                    Address::new(self.next_page_range, page, offset),
+                page_directory_lock.insert(
+                    self.next_rid.load(SeqCst),
+                    Address::new(self.next_page_range.load(SeqCst), page, offset),
                 );
 
-                self.indexer.insert(&columns, self.next_rid);
+                self.indexer.insert(&columns, self.next_rid.load(SeqCst));
 
                 // Increment the RID for the next record
-                self.next_rid += 1;
+                self.next_rid.fetch_add(1, SeqCst);
 
                 // Also add the tail record corresponding to this base record
                 let _result = self.update(
@@ -682,12 +687,12 @@ impl Table {
 
             Err(_) => {
                 // This page range is full - add new range
-                self.page_ranges.push(PageRange::new(
+                page_range_lock.push(PageRange::new(
                     self.table_identifier,
                     self.num_columns + NUM_METADATA_COLS,
                     self.buffer_pool_manager,
                 ));
-                self.next_page_range += 1;
+                self.next_page_range.fetch_add(1, SeqCst);
 
                 return self.insert(columns);
             }
@@ -695,7 +700,7 @@ impl Table {
     }
 
     /// Update an existing record (in other words, insert a **tail record**). Note that we are using the **cumulative** update scheme.
-    pub fn update(&mut self, key: i64, columns: Vec<Option<i64>>) -> bool {
+    pub fn update(&self, key: i64, columns: Vec<Option<i64>>) -> bool {
         if columns.len() < self.num_columns {
             // Project specifies that we should return `false` when something goes wrong
             return false;
@@ -711,14 +716,17 @@ impl Table {
             return false;
         }
 
+        let mut page_range_lock = self.page_ranges.write().unwrap();
+        let mut page_directory_lock = self.page_directory.write().unwrap();
+
         let base_rid = matching_rids[0];
-        let base_address = self.page_directory[&base_rid];
+        let base_address = page_directory_lock[&base_rid];
 
         // Since we're using the cumulative update scheme, we need to grab the remaining values first
         let mut cumulative_columns: Vec<Option<i64>> = vec![None; self.num_columns + NUM_METADATA_COLS];
 
         // Grab the base page because we need to check the indirection column
-        match self.page_ranges[base_address.range].read_base_record(
+        match page_range_lock[base_address.range].read_base_record(
             base_address.page,
             base_address.offset,
             &vec![1; self.num_columns + NUM_METADATA_COLS],
@@ -729,9 +737,9 @@ impl Table {
                 if indirection.is_some() && indirection.unwrap() != base_rid as i64 {
                     // We need to grab the last tail record
                     let tail_rid = indirection.unwrap();
-                    let tail_address = self.page_directory[&(tail_rid as usize)];
+                    let tail_address = page_directory_lock[&(tail_rid as usize)];
 
-                    match self.page_ranges[tail_address.range].read_tail_record(
+                    match page_range_lock[tail_address.range].read_tail_record(
                         tail_address.page,
                         tail_address.offset,
                         &vec![1; self.num_columns + NUM_METADATA_COLS],
@@ -799,19 +807,19 @@ impl Table {
 
                 // At this point, `cumulative_columns` contains all of our changes and original data that wasn't updated
                 let indirection_or_base_rid = indirection.unwrap_or(base_rid as i64);
-                let (page, offset) = self.page_ranges[base_address.range]
+                let (page, offset) = page_range_lock[base_address.range]
                     .insert_tail(&cumulative_columns, Some(indirection_or_base_rid));
 
-                if self.page_ranges[base_address.range].num_updates >= THRESHOLD {
-                    self.page_ranges[base_address.range].num_updates = 0;
+                if page_range_lock[base_address.range].num_updates >= THRESHOLD {
+                    page_range_lock[base_address.range].num_updates = 0;
                     match &self.merge_sender {
                         Some(sender) => {
                             sender
                                 .send(MergeRequest::new(
-                                    &self.page_ranges[base_address.range].base_pages.clone(),
-                                    &self.page_ranges[base_address.range].tail_pages.clone(),
-                                    &self.page_ranges[base_address.range].tps.clone(),
-                                    &self.page_directory,
+                                    &page_range_lock[base_address.range].base_pages.clone(),
+                                    &page_range_lock[base_address.range].tail_pages.clone(),
+                                    &page_range_lock[base_address.range].tps.clone(),
+                                    &page_directory_lock,
                                 ))
                                 .unwrap();
                         },
@@ -821,14 +829,14 @@ impl Table {
                 }
 
                 // Add the new RID to physical address mapping
-                self.page_directory.insert(
-                    self.next_rid,
+                page_directory_lock.insert(
+                    self.next_rid.load(SeqCst),
                     Address::new(base_address.range, page, offset),
                 );
 
                 // Update the base record indirection column
-                let result = self.page_ranges[base_address.range]
-                    .update_base_indirection(base_address, self.next_rid);
+                let result = page_range_lock[base_address.range]
+                    .update_base_indirection(base_address, self.next_rid.load(SeqCst));
 
                 if let Err(_error) = result {
                     // Project specifies that we should return `false` when something goes wrong
@@ -836,7 +844,7 @@ impl Table {
                 }
 
                 // Increment the RID for the next record
-                self.next_rid += 1;
+                self.next_rid.fetch_add(1, SeqCst);
 
                 return true;
             }
@@ -846,7 +854,7 @@ impl Table {
     }
 
     /// Select the most recent version of a record given its primary key.
-    pub fn select(&mut self, search_key: i64, search_key_index: usize, projected_columns: Vec<usize>) -> PyResult<Vec<PyRecord>> {
+    pub fn select(&self, search_key: i64, search_key_index: usize, projected_columns: Vec<usize>) -> PyResult<Vec<PyRecord>> {
         let rids = self
             .indexer
             .locate_range(search_key, search_key, search_key_index);
@@ -927,7 +935,7 @@ impl Table {
         Ok(sum)
     }
 
-    pub fn select_version(&mut self, search_key: i64, search_key_index: usize, proj: Vec<usize>, relative_version: i64) -> PyResult<Vec<PyRecord>> {
+    pub fn select_version(&self, search_key: i64, search_key_index: usize, proj: Vec<usize>, relative_version: i64) -> PyResult<Vec<PyRecord>> {
         let rids = self
             .indexer
             .locate_range(search_key, search_key, search_key_index);
@@ -964,11 +972,15 @@ impl Table {
         // get indirection
         projected_columns[self.num_columns + NUM_METADATA_COLS - 1 - INDIRECTION_REV_IDX] = 1;
         let mut tail_rid_indirection: usize;
+
+        let page_directory_lock = self.page_directory.read().unwrap();
+        let page_range_lock = self.page_ranges.read().unwrap();
+
         // starting from the newest version...
         while version > relative_version {
-            let tail_address = self.page_directory[&tail_rid];
+            let tail_address = page_directory_lock[&tail_rid];
 
-            match self.page_ranges[tail_address.range].read_tail_record(
+            match page_range_lock[tail_address.range].read_tail_record(
                 tail_address.page,
                 tail_address.offset,
                 &projected_columns,
@@ -995,7 +1007,7 @@ impl Table {
         return ((tail_rid == rid), tail_rid as RID);
     }
 
-    pub fn delete(&mut self, primary_key: i64) -> PyResult<()> {
+    pub fn delete(&self, primary_key: i64) -> PyResult<()> {
         // First, we need to get the RID corresponding to the base record with this primary key
         let base_rid = self
             .indexer
@@ -1006,11 +1018,14 @@ impl Table {
             return Ok(());
         }
 
+        let page_range_lock = self.page_ranges.write().unwrap();
+        let page_directory_lock = self.page_directory.write().unwrap();
+
         let base_rid = base_rid[0];
-        let base_address = self.page_directory[&base_rid];
+        let base_address = page_directory_lock[&base_rid];
         let projection = vec![1; self.num_columns + NUM_METADATA_COLS];
 
-        match self.page_ranges[base_address.range].read_base_record(
+        match page_range_lock[base_address.range].read_base_record(
             base_address.page,
             base_address.offset,
             &projection,
@@ -1036,10 +1051,10 @@ impl Table {
 
                 // Otherwise, there are tail records and we need to traverse all of them
                 let mut tail_rid = tail_rid.unwrap();
-                let mut tail_address = self.page_directory[&(tail_rid as usize)];
+                let mut tail_address = page_directory_lock[&(tail_rid as usize)];
 
                 loop {
-                    match self.page_ranges[tail_address.range].read_tail_record(
+                    match page_range_lock[tail_address.range].read_tail_record(
                         tail_address.page,
                         tail_address.offset,
                         &projection,
@@ -1063,7 +1078,7 @@ impl Table {
 
                             // Prepare for the next iteration of this loop
                             tail_rid = prev_tail_rid;
-                            tail_address = self.page_directory[&(tail_rid as usize)];
+                            tail_address = page_directory_lock[&(tail_rid as usize)];
                         },
 
                         Err(_) => {
@@ -1087,14 +1102,17 @@ impl Table {
 impl Table {
     /// Select one record given its RID and a column projection.
     fn select_by_rid(&self, rid: RID, proj: &Vec<usize>) -> Result<Vec<Option<i64>>, DatabaseError> {
-        let base_address = self.page_directory[&rid];
+        let page_range_lock = self.page_ranges.read().unwrap();
+        let page_directory_lock = self.page_directory.read().unwrap();
+        
+        let base_address = page_directory_lock[&rid];
 
         let mut effective_proj = proj.clone();
         effective_proj.resize(self.num_columns + NUM_METADATA_COLS, 0);
         effective_proj[self.num_columns + NUM_METADATA_COLS - 1] = 1;
 
         // First, get the base record
-        match self.page_ranges[base_address.range].read_base_record(
+        match page_range_lock[base_address.range].read_base_record(
             base_address.page,
             base_address.offset,
             &effective_proj,
@@ -1109,9 +1127,9 @@ impl Table {
 
                 // We DO have a most recent tail record - let's find it!
                 let tail_rid = base_columns[base_columns.len() - 1].unwrap();
-                let tail_address = self.page_directory[&(tail_rid as usize)];
+                let tail_address = page_directory_lock[&(tail_rid as usize)];
 
-                match self.page_ranges[tail_address.range].read_tail_record(
+                match page_range_lock[tail_address.range].read_tail_record(
                     tail_address.page,
                     tail_address.offset,
                     &effective_proj,
@@ -1138,7 +1156,10 @@ impl Table {
 
     /// Select record by RID given a relative version.
     fn select_by_rid_version(&self, rid: RID, proj: &Vec<usize>, relative_version: i64) -> Result<Vec<Option<i64>>, DatabaseError> {
-        let base_address = self.page_directory[&rid];
+        let page_range_lock = self.page_ranges.read().unwrap();
+        let page_directory_lock = self.page_directory.read().unwrap();
+        
+        let base_address = page_directory_lock[&rid];
 
         // We need to guarantee that the metadata (indirection) will be present
         let mut effective_proj = proj.clone();
@@ -1148,7 +1169,7 @@ impl Table {
         effective_proj[onehot_indir_idx] = 1;
 
         // First, get the base record
-        match self.page_ranges[base_address.range].read_base_record(
+        match page_range_lock[base_address.range].read_base_record(
             base_address.page,
             base_address.offset,
             &effective_proj,
@@ -1167,10 +1188,10 @@ impl Table {
                 let tail_rid = base_columns[indir_idx].unwrap() as usize;
 
                 let (is_base, historic_rid) = self.get_version(rid, tail_rid, relative_version);
-                let historic_address = self.page_directory[&historic_rid];
+                let historic_address = page_directory_lock[&historic_rid];
 
                 if is_base {
-                    match self.page_ranges[historic_address.range].read_base_record(
+                    match page_range_lock[historic_address.range].read_base_record(
                         historic_address.page,
                         historic_address.offset,
                         &effective_proj,
@@ -1184,7 +1205,7 @@ impl Table {
                         }
                     }
                 } else {
-                    match self.page_ranges[historic_address.range].read_tail_record(
+                    match page_range_lock[historic_address.range].read_tail_record(
                         historic_address.page,
                         historic_address.offset,
                         &effective_proj,
