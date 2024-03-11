@@ -32,7 +32,7 @@ def correctness_tester1():
     db = Database()
     db.open("./CT")
     test_table = db.create_table('test', 5, 0)
-    query = Query(test_table)
+    query = Query(db, test_table)
     for record in records:
         query.insert(*record)
     try:
@@ -131,7 +131,7 @@ def correctness_tester1():
             [7, 0, 9, 1, 0],
             [8, 1, 1, 1, 1],
         ]
-        query2 = Query(test_table2)
+        query2 = Query(db, test_table2)
         for record in records2:
             query2.insert(*record)
         result = reorganize_result(query2.select(1, 0, [1,1,1,1,1]))
@@ -157,7 +157,7 @@ def correctness_tester2():
             [7, 0, 6, 1, 0],
             [8, 1, 7, 1, 1],
         ]
-        query3 = Query(test_table3)
+        query3 = Query(db, test_table3)
         for record in records3:
             query3.insert(*record)
         result = query3.sum(3, 5, 4)
@@ -210,7 +210,7 @@ def durability_tester1():
         grades_table = db.create_table('Grades', 5, 0)
 
         # create a query class for the grades table
-        query = Query(grades_table)
+        query = Query(db, grades_table)
 
         # dictionary for records to test the database: test directory
         records = {}
@@ -287,7 +287,7 @@ def durability_tester2():
         grades_table = db.get_table('Grades')
 
         # create a query class for the grades table
-        query = Query(grades_table)
+        query = Query(db, grades_table)
 
         # dictionary for records to test the database: test directory
 
@@ -331,7 +331,7 @@ def merging_tester():
     db = Database()
     db.open("./MT")
     merge_table = db.create_table('merge', 5, 0)
-    query = Query(merge_table)
+    query = Query(db, merge_table)
     update_nums = [2, 4, 8, 16]
     records_num = 10000
     sample_count = 200

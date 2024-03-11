@@ -10,7 +10,8 @@ class Query:
     Queries that succeed should return the result or True
     Any query that crashes (due to exceptions) should return False
     """
-    def __init__(self, table):
+    def __init__(self, db, table):
+        self.db = db
         self.table = table
         pass
 
@@ -22,7 +23,7 @@ class Query:
     # Return False if record doesn't exist or is locked due to 2PL
     """
     def delete(self, primary_key):
-        self.table.delete(primary_key)
+        self.db.db.delete(self.table.id, primary_key)
     
     """
     # Insert a record with specified columns
@@ -30,9 +31,7 @@ class Query:
     # Returns False if insert fails for whatever reason
     """
     def insert(self, *columns):
-        # schema_encoding = '0' * self.table.num_columns
-        col_list = list(columns)
-        self.table.insert(col_list);
+        return self.db.db.insert(self.table.id, list(columns))
     
     """
     # Read matching record with specified search key
@@ -44,7 +43,7 @@ class Query:
     # Assume that select will never be called on a key that doesn't exist
     """
     def select(self, search_key, search_key_index, projected_columns_index):
-        return self.table.select(search_key, search_key_index, projected_columns_index);
+        return self.db.db.select(self.table.id, search_key, search_key_index, projected_columns_index)
     
     """
     # Read matching record with specified search key
@@ -57,17 +56,14 @@ class Query:
     # Assume that select will never be called on a key that doesn't exist
     """
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
-        res = self.table.select_version(search_key, search_key_index, projected_columns_index, relative_version)
-        return res
+        return self.db.db.select_version(self.table.id, search_key, search_key_index, projected_columns_index, relative_version)
     """
     # Update a record with specified key and columns
     # Returns True if update is succesful
     # Returns False if no records exist with given key or if the target record cannot be accessed due to 2PL locking
     """
     def update(self, primary_key, *columns):
-        col_list = list(columns)
-        self.table.update(primary_key, col_list)
-
+        return self.db.db.update(self.table.id, primary_key, list(columns))
     
     """
     :param start_range: int         # Start of the key range to aggregate 
@@ -78,8 +74,7 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum(self, start_range, end_range, aggregate_column_index):
-        return self.table.sum(start_range, end_range, aggregate_column_index)
-
+        return self.db.db.sum(self.table.id, start_range, end_range, aggregate_column_index)
     
     """
     :param start_range: int         # Start of the key range to aggregate 
@@ -91,8 +86,7 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
-        return self.table.sum_version(start_range, end_range, aggregate_column_index, relative_version)
-
+        return self.db.db.sum_version(self.table.id, start_range, end_range, aggregate_column_index, relative_version)
     
     """
     incremenets one column of the record

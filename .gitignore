@@ -2,6 +2,9 @@ Cargo.lock
 .DS_Store
 .*.swp
 
+# Database directories
+./COW_*
+
 # Generated Python scripts
 ./tests/generated_scripts
 *.log.py

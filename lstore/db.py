@@ -1,55 +1,21 @@
-from cowabunga_rs import table_module, buffer_pool_module
-import shutil
+from cowabunga_rs import database_module
 
+# Wraps the database object written in Rust
 class Database():
     def __init__(self):
-        self.directory = None
-        self.tables = []
-        self.loaded = False
+        self.db = database_module.Database()
 
-        try:
-            shutil.rmtree("./COWDAT")
-        except:
-            pass
-
-        self.open("COWDAT")
-
-    # Not required for milestone1
     def open(self, path):
-        self.directory = path
+        self.db.open(path)
 
     def close(self):
-        for table in self.tables:
-            table.persist()
-        
-        table_module.persist_bpm()
+        self.db.close()
 
-    """
-    # Creates a new table
-    :param name: string         #Table name
-    :param num_columns: int     #Number of Columns: all columns are integer
-    :param key: int             #Index of table key in columns
-    """
     def create_table(self, name, num_columns, key_index):
-        if not self.loaded:
-            table = table_module.Table(self.directory, name, num_columns, key_index, True)
-            self.loaded = True
-        else:
-            table = table_module.Table(self.directory, name, num_columns, key_index, False)
-        
-        self.tables.append(table)
-        return table
+        return self.db.create_table(name, num_columns, key_index)
 
-    """
-    # Deletes the specified table
-    """
     def drop_table(self, name):
         pass
 
-    """
-    # Returns table with the passed name
-    """
     def get_table(self, name):
-        table = table_module.Table(self.directory, name, 0, 0, True)
-        self.tables.append(table)
-        return table
+        return self.db.get_table(name)
