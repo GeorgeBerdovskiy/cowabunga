@@ -17,7 +17,7 @@ def speed_tester1():
     grades_table = db.create_table('Grades', 5, 0)
 
     # create a query class for the grades table
-    query = Query(grades_table)
+    query = Query(db, grades_table)
 
     # dictionary for records to test the database: test directory
     records = {}
@@ -105,7 +105,7 @@ def speed_tester2():
     grades_table = db.create_table('Grades', 5, 0)
 
     # create a query class for the grades table
-    query = Query(grades_table)
+    query = Query(db, grades_table)
 
     # dictionary for records to test the database: test directory
     records = {}
@@ -201,7 +201,7 @@ def correctness_tester():
     grades_table = db.create_table('Grades', 5, 0)
 
     # create a query class for the grades table
-    query = Query(grades_table)
+    query = Query(db, grades_table)
 
     # dictionary for records to test the database: test directory
     records = {}

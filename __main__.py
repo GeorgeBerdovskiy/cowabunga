@@ -6,7 +6,7 @@ from random import choice, randrange
 # Student Id and 4 grades
 db = Database()
 grades_table = db.create_table('Grades', 5, 0)
-query = Query(grades_table)
+query = Query(db, grades_table)
 keys = []
 
 insert_time_0 = process_time()

@@ -205,7 +205,7 @@ impl BufferPool {
 
         // TODO - Open the default directory
         BufferPool {
-            directory: Arc::new(RwLock::new(String::from("./COWDAT"))),
+            directory: Arc::new(RwLock::new(String::from("./COW_DAT"))),
             frames,
             page_map: Arc::new(RwLock::new(HashMap::new())),
             table_identifiers: Arc::new(RwLock::new(HashMap::new())),
