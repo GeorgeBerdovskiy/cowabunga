@@ -205,7 +205,7 @@ impl BufferPool {
 
         // TODO - Open the default directory
         BufferPool {
-            directory: Arc::new(RwLock::new(String::from("cowdat"))),
+            directory: Arc::new(RwLock::new(String::from("./COWDAT"))),
             frames,
             page_map: Arc::new(RwLock::new(HashMap::new())),
             table_identifiers: Arc::new(RwLock::new(HashMap::new())),
@@ -217,10 +217,10 @@ impl BufferPool {
     /// Set the working directory on disk. This will create the requested directory if it doesn't
     /// exist yet and open it otherwise. If the directory exists, it will also load all relevant
     /// metadata into memory.
-    pub fn set_directory(&self, is_load: bool, path: &str) {
+    pub fn set_directory(&self, path: &str) {
         let dir_path = Path::new(path);
 
-        if dir_path.exists() && is_load  {
+        if dir_path.exists()  {
             // The requested directory already exists - load all metadata
             let metadata_path = format!("{}/bp.hdr", path);
             let mut metadata_file = File::open(metadata_path).unwrap();
@@ -233,7 +233,7 @@ impl BufferPool {
             let mut tbl_id_wlock = self.table_identifiers.write().unwrap();
             *tbl_id_wlock = metadata.table_identifiers;
             self.next_table_id.store(metadata.next_table_id, Ordering::SeqCst);
-        } else if !dir_path.exists() && is_load {
+        } else {
             // Directory doesn't exist, so create it
             std::fs::create_dir(path).unwrap();
         }

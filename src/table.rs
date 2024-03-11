@@ -19,11 +19,6 @@ use std::sync::RwLock;
 use std::sync::atomic::Ordering;
 use once_cell::sync::Lazy;
 
-static BPM: Lazy<BufferPool> = Lazy::new(|| {
-    // This block is run only once to initialize the instance of BufferPool
-    BufferPool::new()
-});
-
 /// Zero sized struct representing **base** pages.
 #[derive(Clone, Copy, Debug)]
 struct Base;
@@ -39,7 +34,7 @@ struct LogicalPage<T> {
     columns: Vec<PhysicalPageID>,
 
     /// Buffer pool manager shared by all tables.
-    buffer_pool_manager: &'static BufferPool,
+    buffer_pool_manager: Arc<Mutex<BufferPool>>,
 
     /// Phantom field for the generic type argument (required since none of the other fields actually use `T`).
     phantom: PhantomData<T>,
@@ -48,9 +43,9 @@ struct LogicalPage<T> {
 /// Methods for all logical pages.
 impl<T> LogicalPage<T> {
     /// Create a new logical page with `num_columns` columns and a shared buffer pool manager.
-    pub fn new(table_id: usize, num_columns: usize, buffer_pool_manager: &'static BufferPool) -> LogicalPage<T> {
+    pub fn new(table_id: usize, num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> LogicalPage<T> {
         LogicalPage {
-            columns: buffer_pool_manager.allocate_pages(table_id, num_columns),
+            columns: buffer_pool_manager.clone().lock().unwrap().allocate_pages(table_id, num_columns),
             buffer_pool_manager,
             phantom: PhantomData::<T>,
         }
@@ -66,7 +61,7 @@ impl<T> LogicalPage<T> {
             }
 
             result.push(
-                self.buffer_pool_manager.read(self.columns[i], offset)?,
+                self.buffer_pool_manager.lock().unwrap().read(self.columns[i], offset)?,
             );
         }
 
@@ -84,7 +79,7 @@ impl LogicalPage<Base> {
         // This adds the user's columns, but _not_ the metadata columns
         for (user_column, column_value) in self.columns.iter().zip(columns.iter()) {
             offset = self
-                .buffer_pool_manager.write_next_value(*user_column, *column_value)?;
+                .buffer_pool_manager.lock().unwrap().write_next_value(*user_column, *column_value)?;
         }
 
         // Write the indirection column, which is last
@@ -97,7 +92,7 @@ impl LogicalPage<Base> {
     pub fn update_indirection(&mut self, offset: Offset, new_rid: RID) -> Result<(), DatabaseError> {
         // The columns are _ | _ | ... | INDIRECTION
         let indirection_column = self.columns[self.columns.len() - 1];
-        self.buffer_pool_manager.write_value(indirection_column, offset, Some(new_rid as i64))
+        self.buffer_pool_manager.lock().unwrap().write_value(indirection_column, offset, Some(new_rid as i64))
     }
 }
 
@@ -113,10 +108,14 @@ impl LogicalPage<Tail> {
             .zip(self.columns.iter().take(self.columns.len() - 1))
         {
             offset = self.buffer_pool_manager
+                .lock()
+                .unwrap()
                 .write_next_value(column_value, user_column)?;
         }
 
         self.buffer_pool_manager
+            .lock()
+            .unwrap()
             .write_next_value(self.columns[self.columns.len() - 1], indirection)?;
 
         Ok(offset)
@@ -145,7 +144,7 @@ struct PageRange {
     num_columns: usize,
 
     /// Shared buffer pool manager.
-    buffer_pool_manager: &'static BufferPool,
+    buffer_pool_manager: Arc<Mutex<BufferPool>>,
 
     num_updates: usize,
 
@@ -154,9 +153,9 @@ struct PageRange {
 
 impl PageRange {
     /// Create a new page range given the number of columns and a shared buffer pool manager.
-    pub fn new(table_identifier: usize, num_columns: usize, buffer_pool_manager: &'static BufferPool) -> Self {
+    pub fn new(table_identifier: usize, num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> Self {
         let base_page_vec = (0..BASE_PAGES_PER_RANGE)
-            .map(|_| LogicalPage::new(table_identifier, num_columns, buffer_pool_manager))
+            .map(|_| LogicalPage::new(table_identifier, num_columns, buffer_pool_manager.clone()))
             .collect();
 
         PageRange {
@@ -165,7 +164,7 @@ impl PageRange {
             tail_pages: vec![LogicalPage::<Tail>::new(
                 table_identifier,
                 num_columns,
-                buffer_pool_manager,
+                buffer_pool_manager.clone(),
             )],
             next_base_page: 0,
             num_columns,
@@ -205,7 +204,7 @@ impl PageRange {
                 self.tail_pages.push(LogicalPage::new(
                     self.table_identifier,
                     self.num_columns,
-                    self.buffer_pool_manager,
+                    self.buffer_pool_manager.clone(),
                 ));
 
                 // Recursively insert which will have at most one level of recursion
@@ -231,7 +230,7 @@ impl PageRange {
                 self.base_pages.push(LogicalPage::new(
                     self.table_identifier,
                     self.num_columns,
-                    self.buffer_pool_manager,
+                    self.buffer_pool_manager.clone(),
                 ));
 
                 // Note that although this call is recursive, it will have a depth of at most one
@@ -319,7 +318,7 @@ pub struct Table {
     next_page_range: AtomicUsize,
 
     /// Buffer pool manager shared by all tables.
-    buffer_pool_manager: &'static BufferPool,
+    buffer_pool_manager: Arc<Mutex<BufferPool>>,
 
     /// B-Tree indexes on all columns (except metadata).
     indexer: Arc<RwLock<Indexer>>,
@@ -455,19 +454,15 @@ impl MergeRequest {
     }
 }
 
-#[pymethods]
 impl Table {
     /// Create a new table given its name, number of columns, primary key column index, and shared
     /// buffer pool manager.
-    #[new]
-    //pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, buffer_pool_manager: &'static BufferPool)
-    pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, is_load: bool) -> Self {
+    pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, BPM: Arc<Mutex<BufferPool>>) -> Self {
         println!("DEBUG: about to access BPM");
 
-        BPM.set_directory(is_load, &directory as &str);
         println!("DEBUG: trying to register table");
         // TODO problem here
-        let table_identifier = BPM.register_table_name(&name);
+        let table_identifier = BPM.lock().unwrap().register_table_name(&name);
 
         println!("DEBUG: set bpm dir");
 
@@ -498,9 +493,9 @@ impl Table {
                 let page_ranges = vec![PageRange::new(
                     table_identifier,
                     num_columns + NUM_METADATA_COLS,
-                    &BPM,
+                    BPM.clone(),
                 )];
-                let merge_sender = start_merge_thread(num_columns, &BPM);
+                let merge_sender = start_merge_thread(num_columns, BPM.clone());
                 return Table {
                     directory,
                     name,
@@ -513,7 +508,7 @@ impl Table {
                     page_ranges: Arc::new(RwLock::new(page_ranges)),
                     page_directory: Arc::new(RwLock::new(HashMap::new())),
                     next_page_range: AtomicUsize::new(0),
-                    buffer_pool_manager: &BPM,
+                    buffer_pool_manager: BPM.clone(),
 
                     indexer: Arc::new(RwLock::new(Indexer::new(num_columns))),
                     dead_rids: Arc::new(RwLock::new(Vec::new())),
@@ -527,6 +522,7 @@ impl Table {
                 // Table files already exist - load from those disk
                 // Also disregard the `num_columns` and `key_column` arguments
                 let metadata_path = format!("{}/{}/table.hdr", directory, table_identifier);
+                
                 let mut metadata_file = File::open(metadata_path).unwrap();
 
                 let mut metadata_string = String::new();
@@ -534,7 +530,9 @@ impl Table {
 
                 let metadata: TableMetadata = serde_json::from_str(&metadata_string).unwrap();
 
-                let merge_sender = start_merge_thread(metadata.num_columns, &BPM);
+                let merge_sender = start_merge_thread(metadata.num_columns, BPM.clone());
+                
+                let BPM_later = BPM.clone();
                 return Table {
                     directory,
                     name,
@@ -552,7 +550,7 @@ impl Table {
                                 .iter()
                                 .map(|serialized_base_page| LogicalPage {
                                     columns: serialized_base_page.columns.clone(),
-                                    buffer_pool_manager: &BPM,
+                                    buffer_pool_manager: BPM.clone(),
                                     phantom: PhantomData::<Base>,
                                 })
                                 .collect(),
@@ -561,20 +559,20 @@ impl Table {
                                 .iter()
                                 .map(|serialized_tail_page| LogicalPage {
                                     columns: serialized_tail_page.columns.clone(),
-                                    buffer_pool_manager: &BPM,
+                                    buffer_pool_manager: BPM.clone(),
                                     phantom: PhantomData::<Tail>,
                                 })
                                 .collect(),
                             next_base_page: serialized_range.next_base_page,
                             num_columns: metadata.num_columns + NUM_METADATA_COLS,
-                            buffer_pool_manager: &BPM,
+                            buffer_pool_manager: BPM_later.clone(),
                             num_updates: 0,
                             tps: Arc::new(AtomicUsize::new(serialized_range.tps)),
                         })
                         .collect())),
                     page_directory: Arc::new(RwLock::new(metadata.page_directory)),
                     next_page_range: AtomicUsize::new(metadata.next_page_range),
-                    buffer_pool_manager: &BPM,
+                    buffer_pool_manager: BPM_later,
                     indexer: Arc::new(RwLock::new(metadata.indexer)),
                     dead_rids: Arc::new(RwLock::new(Vec::new())),
                     merge_sender,
@@ -582,7 +580,10 @@ impl Table {
             }
         };
     }
+}
 
+#[pymethods]
+impl Table {
     /// Persist table metadata onto disk
     pub fn persist(&self) {
         // First, collect everything into the metadata struct
@@ -678,6 +679,10 @@ impl Table {
                 self.next_rid.fetch_add(1, Ordering::SeqCst);
 
                 // Also add the tail record corresponding to this base record
+                drop(indexer_wlock);
+                drop(page_directory_lock);
+                drop(page_range_lock);
+
                 let _result = self.update(
                     columns_wrapped[self.key_column].unwrap(),
                     columns_wrapped.into_iter().take(self.num_columns).collect(),
@@ -692,10 +697,13 @@ impl Table {
                 page_range_lock.push(PageRange::new(
                     self.table_identifier,
                     self.num_columns + NUM_METADATA_COLS,
-                    self.buffer_pool_manager,
+                    self.buffer_pool_manager.clone(),
                 ));
                 self.next_page_range.fetch_add(1, Ordering::SeqCst);
 
+                drop(indexer_wlock);
+                drop(page_directory_lock);
+                drop(page_range_lock);
                 return self.insert(columns);
             }
         }
@@ -1247,7 +1255,7 @@ impl Table {
 }
 
 /// Initializes the internal merge thread.
-pub fn start_merge_thread(num_columns: usize, bpm: &'static BufferPool) -> Option<Sender<MergeRequest>> {
+pub fn start_merge_thread(num_columns: usize, bpm: Arc<Mutex<BufferPool>>) -> Option<Sender<MergeRequest>> {
     let (tx, rx) = mpsc::channel::<MergeRequest>();
 
     thread::spawn(move || {
@@ -1278,6 +1286,8 @@ pub fn start_merge_thread(num_columns: usize, bpm: &'static BufferPool) -> Optio
                         let indirection_column_identifier =
                             logical_bp.columns[num_columns + NUM_METADATA_COLS - 1];
                         let page = bpm
+                            .lock()
+                            .unwrap()
                             .request_page(indirection_column_identifier);
 
                         // NOTE - We must skip the last cell as it contains the next available offset and NOT an RID
@@ -1315,6 +1325,8 @@ pub fn start_merge_thread(num_columns: usize, bpm: &'static BufferPool) -> Optio
                     for tp_index in tail_page_to_rids.keys() {
                         for i in 0..num_columns {
                             let page = bpm
+                                .lock()
+                                .unwrap()
                                 .request_page(tail_pages[*tp_index].columns[i]);
                             physical_tail_pages[*tp_index][i] = page;
                         }
@@ -1371,8 +1383,9 @@ pub fn start_merge_thread(num_columns: usize, bpm: &'static BufferPool) -> Optio
                     {
                         // Note that we are NOT writing the indirection column
                         for i in 0..num_columns {
-                            bpm.
-                                write_page_masked(corresp_phys_bps[i], logical_bp.columns[i]);
+                            bpm.lock()
+                                .unwrap()
+                                .write_page_masked(corresp_phys_bps[i], logical_bp.columns[i]);
                         }
                     }
 
@@ -1387,9 +1400,4 @@ pub fn start_merge_thread(num_columns: usize, bpm: &'static BufferPool) -> Optio
     });
 
     return Some(tx);
-}
-
-#[pyfunction]
-pub fn persist_bpm() {
-    BPM.persist();
 }

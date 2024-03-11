@@ -5,6 +5,7 @@ pub mod bufferpool;
 pub mod table;
 pub mod errors;
 pub mod persistables;
+pub mod database;
 
 #[pymodule]
 fn buffer_pool_module(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -15,7 +16,12 @@ fn buffer_pool_module(_py: Python, m: &PyModule) -> PyResult<()> {
 #[pymodule]
 fn table_module(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<table::Table>()?;
-    m.add_function(wrap_pyfunction!(table::persist_bpm, m)?);
+    Ok(())
+}
+
+#[pymodule]
+fn database_module(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<database::Database>()?;
     Ok(())
 }
 
@@ -30,5 +36,6 @@ fn cowabunga_rs(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pymodule!(table_module))?;
     m.add_wrapped(wrap_pymodule!(buffer_pool_module))?;
     m.add_wrapped(wrap_pymodule!(record_type_module))?;
+    m.add_wrapped(wrap_pymodule!(database_module))?;
     Ok(())
 }
