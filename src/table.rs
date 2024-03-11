@@ -952,7 +952,6 @@ impl Table {
     }
 
     pub fn select_version(&self, search_key: i64, search_key_index: usize, proj: Vec<usize>, relative_version: i64) -> PyResult<Vec<PyRecord>> {
-
         let indexer_rlock = self.indexer.read().unwrap();
         let rids = indexer_rlock
             .locate_range(search_key, search_key, search_key_index);

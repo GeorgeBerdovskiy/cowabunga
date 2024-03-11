@@ -12,7 +12,7 @@ db.open('./ECS165')
 grades_table = db.create_table('Grades', 5, 0)
 
 # create a query class for the grades table
-query = Query(grades_table)
+query = Query(db, grades_table)
 
 # dictionary for records to test the database: test directory
 records = {}

@@ -1,4 +1,4 @@
-from lstore.table import Table, Record
+from lstore.table import Table
 from lstore.index import Index
 
 class TransactionWorker:
