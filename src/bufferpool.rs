@@ -370,6 +370,7 @@ impl BufferPool {
     /// that's chosen to hold it.
     fn bring_page_into_pool(&self, global_page_index: PhysicalPageID) -> usize {
         // First, check if an empty frame exists
+
         for i in 0..BP_NUM_FRAMES {
             let mut frame = self.frames[i].write().unwrap();
 
@@ -396,37 +397,38 @@ impl BufferPool {
 
         // At this point, we failed to get an empty frame (and there will never be an empty frame again)
         // For this reason, we need to check for a frame that we can evict
-        for i in 0..BP_NUM_FRAMES {
-            if Arc::strong_count(&self.frames[i]) - 1 == 0 {
-                // The frame in question is only being used by the buffer pool so we can safely evict it
-                // First, get a write lock on it
-                let mut frame = self.frames[i].write().unwrap();
 
-                // Now let's remove it from the page map
-                let mut page_map_lock = self.page_map.write().unwrap();
-                page_map_lock.remove(&frame.id.unwrap());
-
-                if frame.dirty {
-                    // We need to write this frame before evicting it
-                    self.write_page_to_disk(frame.page.unwrap(), frame.id.unwrap());
-                }
-
-                // Now we can safely overwrite this frame
-                // Let's start by grabbing the requested page from the disk
-                let page = self.get_page_from_disk(global_page_index);
-
-                frame.page = Some(page);
-                frame.empty = false;
-                frame.dirty = false;
-                frame.id = Some(global_page_index);
-
-                // Next, let's update the page map with the newly retrieved and loaded page
-                page_map_lock.entry(global_page_index).or_insert(i);
-
-                // Finally, return the index of the frame that now holds this page
-                return i;
-            }
-        }
+//        for i in 0..BP_NUM_FRAMES {
+//            if Arc::strong_count(&self.frames[i]) - 1 == 0 {
+//                // The frame in question is only being used by the buffer pool so we can safely evict it
+//                // First, get a write lock on it
+//                let mut frame = self.frames[i].write().unwrap();
+//
+//                // Now let's remove it from the page map
+//                let mut page_map_lock = self.page_map.write().unwrap();
+//                page_map_lock.remove(&frame.id.unwrap());
+//
+//                if frame.dirty {
+//                    // We need to write this frame before evicting it
+//                    self.write_page_to_disk(frame.page.unwrap(), frame.id.unwrap());
+//                }
+//
+//                // Now we can safely overwrite this frame
+//                // Let's start by grabbing the requested page from the disk
+//                let page = self.get_page_from_disk(global_page_index);
+//
+//                frame.page = Some(page);
+//                frame.empty = false;
+//                frame.dirty = false;
+//                frame.id = Some(global_page_index);
+//
+//                // Next, let's update the page map with the newly retrieved and loaded page
+//                page_map_lock.entry(global_page_index).or_insert(i);
+//
+//                // Finally, return the index of the frame that now holds this page
+//                return i;
+//            }
+//        }
 
         // At this point, we did not find a page that could be evicted either. For that reason,
         // let's just latch onto a random frame until it no longer has any pins
