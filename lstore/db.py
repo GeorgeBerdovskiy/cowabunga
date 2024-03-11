@@ -5,7 +5,7 @@ class Database():
     def __init__(self):
         self.directory = None
         self.tables = []
-        self.bpm = None
+        self.loaded = False
 
         try:
             shutil.rmtree("./COWDAT")
@@ -16,16 +16,13 @@ class Database():
 
     # Not required for milestone1
     def open(self, path):
-        # MUST OPEN A NEW BUFFER POOL!
-        self.bpm = buffer_pool_module.BufferPool()
         self.directory = path
-        self.bpm.set_directory(path)
 
     def close(self):
         for table in self.tables:
             table.persist()
         
-        self.bpm.persist()
+        table_module.persist_bpm()
 
     """
     # Creates a new table
@@ -34,8 +31,12 @@ class Database():
     :param key: int             #Index of table key in columns
     """
     def create_table(self, name, num_columns, key_index):
-        table = table_module.Table(self.directory, name, num_columns, key_index, self.bpm)
-        table.start_merge_thread()
+        if not self.loaded:
+            table = table_module.Table(self.directory, name, num_columns, key_index, True)
+            self.loaded = True
+        else:
+            table = table_module.Table(self.directory, name, num_columns, key_index, False)
+        
         self.tables.append(table)
         return table
 
@@ -49,7 +50,6 @@ class Database():
     # Returns table with the passed name
     """
     def get_table(self, name):
-        table = table_module.Table(self.directory, name, 0, 0, self.bpm)
-        table.start_merge_thread()
+        table = table_module.Table(self.directory, name, 0, 0, True)
         self.tables.append(table)
         return table

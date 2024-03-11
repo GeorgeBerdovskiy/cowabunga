@@ -1,10 +1,10 @@
 use pyo3::{prelude::*, wrap_pymodule};
 
-mod constants;
-mod bufferpool;
-mod table;
-mod errors;
-mod persistables;
+pub mod constants;
+pub mod bufferpool;
+pub mod table;
+pub mod errors;
+pub mod persistables;
 
 #[pymodule]
 fn buffer_pool_module(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -15,6 +15,7 @@ fn buffer_pool_module(_py: Python, m: &PyModule) -> PyResult<()> {
 #[pymodule]
 fn table_module(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<table::Table>()?;
+    m.add_function(wrap_pyfunction!(table::persist_bpm, m)?);
     Ok(())
 }
 

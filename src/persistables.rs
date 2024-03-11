@@ -6,8 +6,6 @@ use crate::table::{RID, Address, Indexer};
 /// Contains buffer pool metadata for writing to disk.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct BufferPoolPersistable {
-    /// Map from physical pages IDs to the frame indexes they inhabit.
-    pub page_map: HashMap<PhysicalPageID, usize>,
 
     /// Map from table names to identifiers (table identifiers exist only
     /// for ownership / efficiency reasons).
