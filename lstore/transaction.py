@@ -1,4 +1,4 @@
-from lstore.table import Table, Record
+from lstore.table import Table #, Record
 from lstore.index import Index
 
 class Transaction:
@@ -18,7 +18,7 @@ class Transaction:
     # t.add_query(q.update, grades_table, 0, *[None, 1, None, 2, None])
     """
     def add_query(self, query, table, *args):
-        self.queries.append((query, args))
+        self.queries.append((query.__name__, args))
         # use grades_table for aborting
 
         
