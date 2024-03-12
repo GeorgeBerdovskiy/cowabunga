@@ -457,12 +457,12 @@ impl MergeRequest {
 impl Table {
     /// Create a new table given its name, number of columns, primary key column index, and shared
     /// buffer pool manager.
-    pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, BPM: Arc<Mutex<BufferPool>>) -> Self {
+    pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, bpm: Arc<Mutex<BufferPool>>) -> Self {
         println!("DEBUG: about to access BPM");
 
         println!("DEBUG: trying to register table");
         // TODO problem here
-        let table_identifier = BPM.lock().unwrap().register_table_name(&name);
+        let table_identifier = bpm.lock().unwrap().register_table_name(&name);
 
         println!("DEBUG: set bpm dir");
 
@@ -493,9 +493,9 @@ impl Table {
                 let page_ranges = vec![PageRange::new(
                     table_identifier,
                     num_columns + NUM_METADATA_COLS,
-                    BPM.clone(),
+                    bpm.clone(),
                 )];
-                let merge_sender = start_merge_thread(num_columns, BPM.clone());
+                let merge_sender = start_merge_thread(num_columns, bpm.clone());
                 return Table {
                     directory,
                     name,
@@ -508,7 +508,7 @@ impl Table {
                     page_ranges: Arc::new(RwLock::new(page_ranges)),
                     page_directory: Arc::new(RwLock::new(HashMap::new())),
                     next_page_range: AtomicUsize::new(0),
-                    buffer_pool_manager: BPM.clone(),
+                    buffer_pool_manager: bpm.clone(),
 
                     indexer: Arc::new(RwLock::new(Indexer::new(num_columns))),
                     dead_rids: Arc::new(RwLock::new(Vec::new())),
@@ -530,9 +530,9 @@ impl Table {
 
                 let metadata: TableMetadata = serde_json::from_str(&metadata_string).unwrap();
 
-                let merge_sender = start_merge_thread(metadata.num_columns, BPM.clone());
+                let merge_sender = start_merge_thread(metadata.num_columns, bpm.clone());
                 
-                let BPM_later = BPM.clone();
+                let bpm_later = bpm.clone();
                 return Table {
                     directory,
                     name,
@@ -550,7 +550,7 @@ impl Table {
                                 .iter()
                                 .map(|serialized_base_page| LogicalPage {
                                     columns: serialized_base_page.columns.clone(),
-                                    buffer_pool_manager: BPM.clone(),
+                                    buffer_pool_manager: bpm.clone(),
                                     phantom: PhantomData::<Base>,
                                 })
                                 .collect(),
@@ -559,20 +559,20 @@ impl Table {
                                 .iter()
                                 .map(|serialized_tail_page| LogicalPage {
                                     columns: serialized_tail_page.columns.clone(),
-                                    buffer_pool_manager: BPM.clone(),
+                                    buffer_pool_manager: bpm.clone(),
                                     phantom: PhantomData::<Tail>,
                                 })
                                 .collect(),
                             next_base_page: serialized_range.next_base_page,
                             num_columns: metadata.num_columns + NUM_METADATA_COLS,
-                            buffer_pool_manager: BPM_later.clone(),
+                            buffer_pool_manager: bpm_later.clone(),
                             num_updates: 0,
                             tps: Arc::new(AtomicUsize::new(serialized_range.tps)),
                         })
                         .collect())),
                     page_directory: Arc::new(RwLock::new(metadata.page_directory)),
                     next_page_range: AtomicUsize::new(metadata.next_page_range),
-                    buffer_pool_manager: BPM_later,
+                    buffer_pool_manager: bpm_later,
                     indexer: Arc::new(RwLock::new(metadata.indexer)),
                     dead_rids: Arc::new(RwLock::new(Vec::new())),
                     merge_sender,
@@ -844,23 +844,25 @@ impl Table {
                     }
                 }
 
+
+                // atomically get next_rid and increment it.
+                let new_rid = self.next_rid.fetch_add(1, Ordering::SeqCst);
+
+
                 // Add the new RID to physical address mapping
                 page_directory_lock.insert(
-                    self.next_rid.load(Ordering::SeqCst),
+                    new_rid,
                     Address::new(base_address.range, page, offset),
                 );
 
                 // Update the base record indirection column
                 let result = page_range_lock[base_address.range]
-                    .update_base_indirection(base_address, self.next_rid.load(Ordering::SeqCst));
+                    .update_base_indirection(base_address, new_rid);
 
                 if let Err(_error) = result {
                     // Project specifies that we should return `false` when something goes wrong
                     return false;
                 }
-
-                // Increment the RID for the next record
-                self.next_rid.fetch_add(1, Ordering::SeqCst);
 
                 return true;
             }
