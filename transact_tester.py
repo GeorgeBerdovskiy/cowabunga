@@ -1,6 +1,7 @@
 from lstore.db import Database
 from lstore.query import Query
 from lstore.transaction import Transaction
+from lstore.transaction_worker import TransactionWorker
 
 import shutil
 # Delete the old database files
@@ -31,3 +32,6 @@ transact.add_query(query.sum, table, 0, 10, 2)
 transact.add_query(query.sum_version, table, 0, 10, 2, -10)
 
 transact.add_query(query.delete, table, 0)
+
+worker = TransactionWorker(db, [transact])
+worker.run()

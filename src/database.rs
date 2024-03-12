@@ -2,9 +2,13 @@ use pyo3::prelude::*;
 
 use crate::table::{PyRecord, Table};
 use crate::bufferpool::BufferPool;
+use crate::transaction::Transaction;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::fs;
+
+use std::thread::{self, JoinHandle};
 
 #[pyclass]
 pub struct PyTableProxy {
@@ -27,7 +31,10 @@ pub struct Database {
     bpm: Arc<Mutex<BufferPool>>,
 
     /// Describes whether data has been loaded from the disk.
-    loaded: bool
+    loaded: bool,
+
+    running_workers: HashMap<usize, JoinHandle<()>>,
+    next_worker_id: usize
 }
 
 #[pymethods]
@@ -45,7 +52,9 @@ impl Database {
             directory: Some("./COW_DAT".to_string()),
             tables: Vec::new(),
             loaded: false,
-            bpm: Arc::new(Mutex::new(BufferPool::new()))
+            bpm: Arc::new(Mutex::new(BufferPool::new())),
+            next_worker_id: 0,
+            running_workers: HashMap::new()
         }
     }
 
@@ -129,60 +138,21 @@ impl Database {
     pub fn delete(&self, table: usize, primary_key: i64) -> PyResult<()> {
         self.tables[table].delete(primary_key)
     }
+
+    pub fn run_worker(&mut self, transactions: Vec<&PyAny>) -> usize {
+        let new_worker = thread::spawn(move || {
+            println!("Hello!")
+        });
+
+        self.running_workers.insert(self.next_worker_id, new_worker);
+        self.next_worker_id += 1;
+        self.next_worker_id - 1
+    }
+
+    pub fn join_worker(&mut self, worker_id: usize) {
+        let worker = self.running_workers.remove(&worker_id);
+        if worker.is_some() {
+            worker.unwrap().join().unwrap();
+        }
+    }
 }
-
-/*
-
-class Database():
-    def __init__(self):
-        self.directory = None
-        self.tables = []
-        self.loaded = False
-
-        try:
-            shutil.rmtree("./COW_DAT")
-        except:
-            pass
-
-        self.open("COW_DAT")
-
-    # Not required for milestone1
-    def open(self, path):
-        self.directory = path
-
-    def close(self):
-        for table in self.tables:
-            table.persist()
-        
-        table_module.persist_bpm()
-
-    """
-    # Creates a new table
-    :param name: string         #Table name
-    :param num_columns: int     #Number of Columns: all columns are integer
-    :param key: int             #Index of table key in columns
-    """
-    def create_table(self, name, num_columns, key_index):
-        if not self.loaded:
-            table = table_module.Table(self.directory, name, num_columns, key_index, True)
-            self.loaded = True
-        else:
-            table = table_module.Table(self.directory, name, num_columns, key_index, False)
-        
-        self.tables.append(table)
-        return table
-
-    """
-    # Deletes the specified table
-    """
-    def drop_table(self, name):
-        pass
-
-    """
-    # Returns table with the passed name
-    """
-    def get_table(self, name):
-        table = table_module.Table(self.directory, name, 0, 0, True)
-        self.tables.append(table)
-        return table
-*/
