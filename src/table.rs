@@ -643,8 +643,11 @@ impl Table {
         // provided for _new_ records. For this reason, we wrap them inside `Some` here.
         let mut columns_wrapped: Vec<Option<i64>> = columns.iter().map(|val| Some(*val)).collect();
 
+        // get next_rid AND atomically increment it for future users
+        let next_rid = self.next_rid.fetch_add(1, Ordering::SeqCst);
+
         // Preemtively add the RID of the tail record copy we will add later
-        columns_wrapped.push(Some((self.next_rid.load(Ordering::SeqCst)) as i64));
+        columns_wrapped.push(Some(next_rid as i64));
 
         if columns.len() < self.num_columns {
             return false;
@@ -665,18 +668,19 @@ impl Table {
         let mut page_range_lock = self.page_ranges.write().unwrap();
         let mut page_directory_lock = self.page_directory.write().unwrap();
 
-        match page_range_lock[self.next_page_range.load(Ordering::SeqCst)].insert_base(&columns_wrapped) {
+
+        let cur_page_range = self.next_page_range.load(Ordering::SeqCst);
+
+        match page_range_lock[cur_page_range].insert_base(&columns_wrapped) {
             Ok((page, offset)) => {
                 // Add the new RID to physical address mapping
                 page_directory_lock.insert(
-                    self.next_rid.load(Ordering::SeqCst),
-                    Address::new(self.next_page_range.load(Ordering::SeqCst), page, offset),
+                    next_rid,
+                    Address::new(cur_page_range, page, offset),
                 );
 
-                indexer_wlock.insert(&columns, self.next_rid.load(Ordering::SeqCst));
+                indexer_wlock.insert(&columns, next_rid);
 
-                // Increment the RID for the next record
-                self.next_rid.fetch_add(1, Ordering::SeqCst);
 
                 // Also add the tail record corresponding to this base record
                 drop(indexer_wlock);

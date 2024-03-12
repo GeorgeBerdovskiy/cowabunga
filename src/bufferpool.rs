@@ -282,7 +282,6 @@ impl BufferPool {
 
 // These methods aren't exposed to Python
 impl BufferPool {
-    // TODO: thread safety
     /// Adds a table name to the map if it isn't there already.
     pub fn register_table_name(&self, name: &str) -> usize {
         let tbl_ids_read = self.table_identifiers.read().unwrap();
@@ -356,18 +355,29 @@ impl BufferPool {
         let _result = file.write(&page_buffer);
     }
 
-    /// Get the index of a frame given the physical page ID or `None` if the buffer pool
-    /// isn't holding the requested page.
-    pub fn read_page_map(&self, global_page_index: PhysicalPageID) -> Option<usize> {
-        // Get a read lock on the page map
-        let page_map_lock = self.page_map.read().unwrap();
+    /// Get a reference to the frame given the physical page ID or `None` if the
+    /// buffer pool isn't holding the requested page.
+    pub fn get_frame_by_ppid(&self, global_page_index: PhysicalPageID) ->
+        Option<Arc<RwLock<Frame>>> {
+
+        let page_map_rlock = self.page_map.read().unwrap();
 
         // Return the index of the requested page (which may not exist here)
-        page_map_lock.get(&global_page_index).cloned()
+        let index = page_map_rlock.get(&global_page_index).cloned();
+
+        match index {
+            Some(i) => {
+                return Some(self.frames[i].clone());
+            },
+            None => {
+                return None;
+            }
+        }
     }
 
-    /// Bring page into the buffer pool from the disk and get the index of the frame
-    /// that's chosen to hold it.
+
+    /// Bring page into the buffer pool from the disk and get the index of the
+    /// frame that's chosen to hold it.
     fn bring_page_into_pool(&self, global_page_index: PhysicalPageID) -> usize {
         // First, check if an empty frame exists
 
@@ -477,10 +487,10 @@ impl BufferPool {
     /// to `self` because this function _may_ need to grab this page from the disk and
     /// write it to an available frame.
     pub fn request_page(&self, id: PhysicalPageID) -> Page {
-        match self.read_page_map(id) {
-            Some(index) => {
+        match self.get_frame_by_ppid(id) {
+            Some(frame_ref) => {
                 // This page is already in the buffer pool - return it
-                return self.frames[index].read().unwrap().page.unwrap();
+                return frame_ref.read().unwrap().page.unwrap();
             },
 
             None => {
@@ -506,10 +516,10 @@ impl BufferPool {
             i += 1;
         }
 
-        match self.read_page_map(id) {
-            Some(index) => {
+        match self.get_frame_by_ppid(id) {
+            Some(frame_ref) => {
                 // This page is already in the buffer pool - write to it
-                let mut frame = self.frames[index].write().unwrap();
+                let mut frame = frame_ref.write().unwrap();
                 frame.dirty = true;
 
                 while i < CELLS_PER_PAGE {
@@ -539,10 +549,10 @@ impl BufferPool {
 
     /// Write an entire page given its physical page ID. The page already exists on disk.
     pub fn write_page(&self, page: Page, id: PhysicalPageID) {
-        match self.read_page_map(id) {
-            Some(index) => {
+        match self.get_frame_by_ppid(id) {
+            Some(frame_ref) => {
                 // This page is already in the buffer pool - write to it
-                let mut frame = self.frames[index].write().unwrap();
+                let mut frame = frame_ref.write().unwrap();
 
                 frame.dirty = true;
                 frame.page = Some(page);
