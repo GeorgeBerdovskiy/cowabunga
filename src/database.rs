@@ -24,6 +24,7 @@ pub struct PyTableProxy {
     primary_key_index: usize
 }
 
+#[derive(Debug)]
 pub enum AbortKind {
     Permanent,
     Temporary,
@@ -209,6 +210,7 @@ impl Database {
         }).unwrap();
 
         let tables_shared = self.tables.clone();
+        let transaction_mgr_shared = self.transaction_manager.clone();
 
         let new_worker = thread::spawn(move || {
             println!("[DEBUG] Worker started...");
@@ -220,6 +222,11 @@ impl Database {
 
             while transactions.len() > 0 {
                 let next_transaction = transactions.pop_front();
+                println!("[DEBUG] Checking transaction compatability...");
+
+                let (abort_kind, transaction_id) = confirm_transaction_compatability(tables_shared.clone(), transaction_mgr_shared.clone(), next_transaction.clone().unwrap());
+                println!("[DEBUG] Compatability check done! {:?} + {:?}", abort_kind, transaction_id);
+
                 println!("\n[DEBUG] Popped another transaction. The queue is now {:?}\n", next_transaction);
             }
 
@@ -242,24 +249,97 @@ impl Database {
     }
 }
 
-/*impl Database {
-    /// Confirm that this transaction is compatible with all currently running queries
-    // TODO - Refactor this to return an enum or something... this is hacky and unpleasant
-    pub fn confirm_transaction_compatability(&mut self, transaction: Transaction) -> (AbortKind, TransactionID) {
-        // Acquire transaction manager lock
-        let mut transact_mgr_lock = self.transaction_manager.lock().unwrap();
+/// Confirm that this transaction is compatible with all currently running queries
+// TODO - Refactor this to return an enum or something... this is hacky and unpleasant
+pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transaction_mgr: Arc<Mutex<TransactionManager>>, transaction: Transaction) -> (AbortKind, TransactionID) {
+    // Acquire transaction manager lock
+    let mut transact_mgr_lock = transaction_mgr.lock().unwrap();
 
-        // Initialize transaction-local hash for compatability
-        let mut transact_local_pkey_compat: HashMap<i64, QueryEffect> = HashMap::new();
+    // Initialize transaction-local hash for compatability
+    let mut transact_local_pkey_compat: HashMap<i64, QueryEffect> = HashMap::new();
 
-        for query in transaction.queries {
-            match query.query {
-                QueryName::Insert => {
-                    let primary_key = query.list_arg[query.primary_key_index].unwrap();
-                    if let Some(query_effect) = transact_local_pkey_compat.get(&primary_key) {
+    for query in transaction.queries {
+        match query.query {
+            QueryName::Insert => {
+                let primary_key = query.list_arg[query.primary_key_index].unwrap();
+                if let Some(query_effect) = transact_local_pkey_compat.get(&primary_key) {
+                    if *query_effect != QueryEffect::Delete {
+                        // This transaction will fail every time because the primary key is
+                        // already in existance - abort permamently
+                        return (AbortKind::Permanent, 0);
+                    }
+                }
+
+                // This query is compatible with all the other queries in THIS transaction
+                // we've seen so far! Now, make sure it's compatible with transactions already running
+
+                if transact_mgr_lock.pkeys_in_process.get(&primary_key).is_some() {
+                    // We can only perform this query if this primary key is absent from all other running transactions
+                    // However, if this record is deleted at some point, we will be able to run this query - abort and retry
+                    return (AbortKind::Temporary, 0);
+                }
+
+                // This query is compatible with all the currently running transactions as well! Finally,
+                // is it compatible with the database in its current state?
+                let matched_rids = tables.lock().unwrap()[query.table].locate_range(primary_key, primary_key, query.primary_key_index);
+                if matched_rids.len() > 0 {
+                    // This primary key already exists in the database - we can't perform it now,
+                    // but we might be able to in the future (if it's deleted or updated)
+                    return (AbortKind::Temporary, 0)
+                }
+
+                // This query is compatible!
+                transact_local_pkey_compat.insert(primary_key, QueryEffect::Create);
+            },
+
+            QueryName::Update => {
+                let old_primary_key = query.single_arg_1.unwrap();
+                let new_primary_key = query.list_arg[query.primary_key_index];
+
+                // We need to check two things -
+                // (1) That the old primary key exists and isn't being worked on by other transactions, and
+                // (2) that the new primary key doesn't exist or has been deleted by a previous query in THIS transaction
+                // If one of these conditions doesn't hold, we need to abort
+
+                // We'll start with the first condition
+                if let Some(query_effect) = transact_local_pkey_compat.get(&old_primary_key) {
+                    // We can only update if the last query working on this primary key WASN'T a delete
+                    if *query_effect == QueryEffect::Delete {
+                        // Will never be able to run this transaction
+                        return (AbortKind::Permanent, 0);
+                    }
+                } else {
+                    // Primary key wasn't added in this transaction, so it must have been
+                    // added earlier and is in the database... right?
+                    let matched_rids = tables.lock().unwrap()[query.table].locate_range(old_primary_key, old_primary_key, query.primary_key_index);
+                    if matched_rids.len() == 0 {
+                        // This record doesn't exist in the database, but it may be added some time
+                        // in the future - abort and retry another time
+                        return (AbortKind::Temporary, 0)
+                    }
+                }
+
+                // This query is compatible with all the other queries in THIS transaction
+                // we've seen so far and it definitelye exists somewhere! Now, make sure
+                // it's compatible with transactions already running
+
+                if transact_mgr_lock.pkeys_in_process.get(&old_primary_key).is_some() {
+                    // We can only perform this query if no other transactions are working on the record in
+                    // question - abort and retry another time
+                    return (AbortKind::Temporary, 0);
+                }
+
+                // We know the old version of this record exists and isn't being worked on
+                // concurrently by another transaction. Now, we want to know if we are allowed
+                // to create the new requested primary key (if there is one specified)
+                if let Some(new_pkey) = new_primary_key {
+                    // User has specified a new primary key - checking it
+                    // should be the same as the checking for insert
+
+                    if let Some(query_effect) = transact_local_pkey_compat.get(&new_pkey) {
                         if *query_effect != QueryEffect::Delete {
                             // This transaction will fail every time because the primary key is
-                            // already in existance - abort permamently
+                            // already in existance locally - abort permamently
                             return (AbortKind::Permanent, 0);
                         }
                     }
@@ -267,7 +347,7 @@ impl Database {
                     // This query is compatible with all the other queries in THIS transaction
                     // we've seen so far! Now, make sure it's compatible with transactions already running
 
-                    if transact_mgr_lock.pkeys_in_process.get(&primary_key).is_some() {
+                    if transact_mgr_lock.pkeys_in_process.get(&new_pkey).is_some() {
                         // We can only perform this query if this primary key is absent from all other running transactions
                         // However, if this record is deleted at some point, we will be able to run this query - abort and retry
                         return (AbortKind::Temporary, 0);
@@ -275,167 +355,93 @@ impl Database {
 
                     // This query is compatible with all the currently running transactions as well! Finally,
                     // is it compatible with the database in its current state?
-                    let matched_rids = self.tables[query.table].locate_range(primary_key, primary_key, query.primary_key_index);
-                    if matched_rids.len() > 0 {
+                    let matching_rids = tables.lock().unwrap()[query.table].locate_range(new_pkey, new_pkey, query.primary_key_index);
+                    if matching_rids.len() > 0 {
                         // This primary key already exists in the database - we can't perform it now,
                         // but we might be able to in the future (if it's deleted or updated)
-                        return (AbortKind::Temporary, 0)
+                        return (AbortKind::Temporary, 0);
                     }
+                    
+                    // The query is compatible!
+                    transact_local_pkey_compat.insert(new_pkey, QueryEffect::Create);
+                }
 
-                    // This query is compatible!
-                    transact_local_pkey_compat.insert(primary_key, QueryEffect::Create);
-                },
+                // At this point, we know this entire query is compatible!
+                transact_local_pkey_compat.insert(old_primary_key, QueryEffect::Delete);
+            },
 
-                QueryName::Update => {
-                    let old_primary_key = query.single_arg_1.unwrap();
-                    let new_primary_key = query.list_arg[query.primary_key_index];
+            QueryName::Select => {
+                // Technically, select is always good because it can't violate integrity constraints. Since
+                // we don't need to handle phantoms in this milestone, we choose to add it anyways.
+            },
 
-                    // We need to check two things -
-                    // (1) That the old primary key exists and isn't being worked on by other transactions, and
-                    // (2) that the new primary key doesn't exist or has been deleted by a previous query in THIS transaction
-                    // If one of these conditions doesn't hold, we need to abort
+            QueryName::Sum => {
+                // Again, sum is always good because it can't violate integrity constraints
+            },
 
-                    // We'll start with the first condition
-                    if let Some(query_effect) = transact_local_pkey_compat.get(&old_primary_key) {
-                        // We can only update if the last query working on this primary key WASN'T a delete
-                        if *query_effect != QueryEffect::Delete {
-                            // Will never be able to run this transaction
+            QueryName::SumVersion => {
+                // Again, sum (version) is always good because it can't violate integrity constraints
+            },
+
+            QueryName::SelectVersion => {
+                // Again, select (version) is always good because it can't violate integrity constraints
+            },
+
+            QueryName::Delete => {
+                // For delete to run successfully...
+                // (1) The primary key being deleted must exist in this transaction or the database, and
+                // (2) it cannot be touched by another transaction at the same time.
+
+                // Preemtively grab the matching RIDs from the database
+                let primary_key = query.single_arg_1.unwrap();
+                let matching_rids = tables.lock().unwrap()[query.table].locate_range(primary_key, primary_key, query.primary_key_index);
+
+                // Let's start with the first condition - has this transaction created the primary key?
+                match transact_local_pkey_compat.get(&primary_key) {
+                    Some(effect) => {
+                        // This transaction has worked on this primary key before! But does it still exist?
+                        if *effect == QueryEffect::Delete {
+                            // Nope - abort permamently
                             return (AbortKind::Permanent, 0);
                         }
-                    }
 
-                    // This query is compatible with all the other queries in THIS transaction
-                    // we've seen so far! Now, make sure it's compatible with transactions already running
-
-                    if transact_mgr_lock.pkeys_in_process.get(&old_primary_key).is_some() {
-                        // We can only perform this query if no other transactions are working on the record in
-                        // question - abort and retry another time
-                        return (AbortKind::Temporary, 0);
-                    }
-
-                    // This query is compatible with all the currently running transactions as well! But does
-                    // the record in question even exist?
-                    let matched_rids = self.tables[query.table].locate_range(old_primary_key, old_primary_key, query.primary_key_index);
-                    if matched_rids.len() == 0 {
-                        // This record doesn't exist in the database, but it may be added some time
-                        // in the future - abort and retry another time
-                        return (AbortKind::Temporary, 0)
-                    }
-
-                    // We know the old version of this record exists and isn't being worked on
-                    // concurrently by another transaction. Now, we want to know if we are allowed
-                    // to create the new requested primary key (if there is one specified)
-                    if let Some(new_pkey) = new_primary_key {
-                        // User has specified a new primary key - checking it
-                        // should be the same as the checking for insert
-
-                        if let Some(query_effect) = transact_local_pkey_compat.get(&new_pkey) {
-                            if *query_effect != QueryEffect::Delete {
-                                // This transaction will fail every time because the primary key is
-                                // already in existance locally - abort permamently
-                                return (AbortKind::Permanent, 0);
-                            }
-                        }
-    
-                        // This query is compatible with all the other queries in THIS transaction
-                        // we've seen so far! Now, make sure it's compatible with transactions already running
-    
-                        if transact_mgr_lock.pkeys_in_process.get(&new_pkey).is_some() {
-                            // We can only perform this query if this primary key is absent from all other running transactions
-                            // However, if this record is deleted at some point, we will be able to run this query - abort and retry
+                        // Otherwise, we can safely delete the record associated with this primary key IF
+                        // it isn't also being worked on by another transaction... that's coming up
+                    }, None => {
+                        // If the primary key doesn't already exist in the database we're in trouble...
+                        if matching_rids.len() == 0 {
+                            // Primary key doesn't already exist in the database - abort and retry another time
                             return (AbortKind::Temporary, 0);
                         }
-    
-                        // This query is compatible with all the currently running transactions as well! Finally,
-                        // is it compatible with the database in its current state?
-                        let matching_rids = self.tables[query.table].locate_range(new_pkey, new_pkey, query.primary_key_index);
-                        if matching_rids.len() > 0 {
-                            // This primary key already exists in the database - we can't perform it now,
-                            // but we might be able to in the future (if it's deleted or updated)
-                            return (AbortKind::Temporary, 0);
-                        }
-                        
-                        // The query is compatible!
-                        transact_local_pkey_compat.insert(new_pkey, QueryEffect::Create);
                     }
-
-                    // At this point, we know this entire query is compatible!
-                    transact_local_pkey_compat.insert(old_primary_key, QueryEffect::Delete);
-                },
-
-                QueryName::Select => {
-                    // Technically, select is always good because it can't violate integrity constraints. Since
-                    // we don't need to handle phantoms in this milestone, we choose to add it anyways.
-                },
-
-                QueryName::Sum => {
-                    // Again, sum is always good because it can't violate integrity constraints
-                },
-
-                QueryName::SumVersion => {
-                    // Again, sum (version) is always good because it can't violate integrity constraints
-                },
-
-                QueryName::SelectVersion => {
-                    // Again, select (version) is always good because it can't violate integrity constraints
-                },
-
-                QueryName::Delete => {
-                    // For delete to run successfully...
-                    // (1) The primary key being deleted must exist in this transaction or the database, and
-                    // (2) it cannot be touched by another transaction at the same time.
-
-                    // Preemtively grab the matching RIDs from the database
-                    let primary_key = query.single_arg_1.unwrap();
-                    let matching_rids = self.tables[query.table].locate_range(primary_key, primary_key, query.primary_key_index);
-
-                    // Let's start with the first condition - has this transaction created the primary key?
-                    match transact_local_pkey_compat.get(&primary_key) {
-                        Some(effect) => {
-                            // This transaction has worked on this primary key before! But does it still exist?
-                            if *effect == QueryEffect::Delete {
-                                // Nope - abort permamently
-                                return (AbortKind::Permanent, 0);
-                            }
-
-                            // Otherwise, we can safely delete the record associated with this primary key IF
-                            // it isn't also being worked on by another transaction... that's coming up
-                        }, None => {
-                            // If the primary key doesn't already exist in the database we're in trouble...
-                            if matching_rids.len() == 0 {
-                                // Primary key doesn't already exist in the database - abort and retry another time
-                                return (AbortKind::Temporary, 0);
-                            }
-                        }
-                    }
-
-                    // We've established that the primary key already exists in the database or was created within
-                    // this transaction previously. Now, make sure it isn't being worked on by a currently running transaction
-
-                    if transact_mgr_lock.pkeys_in_process.get(&primary_key).is_some() {
-                        // We cannot acquire the "lock" for this record - abort and try again
-                        return (AbortKind::Temporary, 0);
-                    }
-
-                    // We're good to go!
-                    transact_local_pkey_compat.insert(primary_key, QueryEffect::Delete);
                 }
+
+                // We've established that the primary key already exists in the database or was created within
+                // this transaction previously. Now, make sure it isn't being worked on by a currently running transaction
+
+                if transact_mgr_lock.pkeys_in_process.get(&primary_key).is_some() {
+                    // We cannot acquire the "lock" for this record - abort and try again
+                    return (AbortKind::Temporary, 0);
+                }
+
+                // We're good to go!
+                transact_local_pkey_compat.insert(primary_key, QueryEffect::Delete);
             }
         }
-
-        // If we've reached this point, that means the transaction is compatible with all other
-        // currently running transactions (and all queries within this transaction are compatible
-        // with one another)
-
-        // Before returning successfully, lock on all the primary keys we'll be touching...
-        for key in transact_local_pkey_compat.keys() {
-            transact_mgr_lock.pkeys_in_process.insert(*key, transact_local_pkey_compat[key]);
-        }
-
-        // ... and register this transaction with the transaction manager
-        let id = transact_mgr_lock.register_transaction_with(transact_local_pkey_compat.keys().cloned().collect());
-
-        // We're done 🎉 return the registered transaction ID
-        (AbortKind::None, id)
     }
-}*/
+
+    // If we've reached this point, that means the transaction is compatible with all other
+    // currently running transactions (and all queries within this transaction are compatible
+    // with one another)
+
+    // Before returning successfully, lock on all the primary keys we'll be touching...
+    for key in transact_local_pkey_compat.keys() {
+        transact_mgr_lock.pkeys_in_process.insert(*key, transact_local_pkey_compat[key]);
+    }
+
+    // ... and register this transaction with the transaction manager
+    let id = transact_mgr_lock.register_transaction_with(transact_local_pkey_compat.keys().cloned().collect());
+
+    // We're done 🎉 return the registered transaction ID
+    (AbortKind::None, id)
+}
