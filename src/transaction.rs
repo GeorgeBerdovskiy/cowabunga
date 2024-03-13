@@ -31,7 +31,8 @@ pub struct Query {
 #[pyclass]
 #[derive(Debug, Clone)]
 pub struct Transaction {
-    pub queries: Vec<Query>
+    pub queries: Vec<Query>,
+    pub try_count: u8
 }
 
 #[pymethods]
@@ -39,7 +40,8 @@ impl Transaction {
     #[new]
     pub fn new() -> Self {
         Transaction {
-            queries: Vec::new()
+            queries: Vec::new(),
+            try_count: 0
         }
     }
 

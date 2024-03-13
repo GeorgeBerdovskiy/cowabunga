@@ -8,7 +8,7 @@ use crate::table::RID;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::fs;
+use std::{default, fs};
 
 use std::thread::{self, JoinHandle};
 
@@ -24,7 +24,7 @@ pub struct PyTableProxy {
     primary_key_index: usize
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum AbortKind {
     Permanent,
     Temporary,
@@ -74,6 +74,16 @@ impl TransactionManager {
         self.transactions_in_process.insert(self.next_transaction_id, pkeys);
         self.next_transaction_id += 1;
         self.next_transaction_id - 1
+    }
+
+    pub fn release_transaction(&mut self, transaction_id: TransactionID) {
+        let associated_rids = &self.transactions_in_process[&transaction_id];
+
+        for rid in associated_rids {
+            self.pkeys_in_process.remove(rid);
+        }
+
+        println!("[DEBUG] Released all locks for transaction with id {:?}", transaction_id);
     }
 }
 
@@ -221,16 +231,31 @@ impl Database {
             // we'll send it to the back of the queue
 
             while transactions.len() > 0 {
-                let next_transaction = transactions.pop_front();
+                let next_transaction = transactions.pop_front().unwrap();
                 println!("[DEBUG] Checking transaction compatability...");
 
-                let (abort_kind, transaction_id) = confirm_transaction_compatability(tables_shared.clone(), transaction_mgr_shared.clone(), next_transaction.clone().unwrap());
+                let (abort_kind, transaction_id) = confirm_transaction_compatability(tables_shared.clone(), transaction_mgr_shared.clone(), next_transaction.clone());
                 println!("[DEBUG] Compatability check done! {:?} + {:?}", abort_kind, transaction_id);
 
+                if abort_kind == AbortKind::Temporary {
+                    let transaction_retry = Transaction {
+                        queries: next_transaction.queries.clone(),
+                        try_count: next_transaction.try_count + 1
+                    };
+
+                    transactions.push_back(transaction_retry);
+                } else {
+                    for query in next_transaction.clone().queries {
+                        run_query(tables_shared.clone(), query);
+                    }
+
+                    transaction_mgr_shared.lock().unwrap().release_transaction(transaction_id);
+                }
+
+                // thread::sleep(Duration::from_millis(5000));
                 println!("\n[DEBUG] Popped another transaction. The queue is now {:?}\n", next_transaction);
             }
 
-            thread::sleep(Duration::from_millis(5000));
             println!("[DEBUG] Worker finished.");
         });
 
@@ -444,4 +469,67 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
 
     // We're done 🎉 return the registered transaction ID
     (AbortKind::None, id)
+}
+
+pub fn run_query(tables: Arc<Mutex<Vec<Table>>>, query: Query) {
+    let table = &tables.lock().unwrap()[query.table];
+
+    match query.query {
+        QueryName::Insert => {
+            table.insert(
+                query.list_arg
+                    .into_iter()
+                    .map(|opt_i64| opt_i64.unwrap())
+                    .collect()
+                );
+        },
+
+        QueryName::Update => {
+            table.update(query.single_arg_1.unwrap(), query.list_arg);
+        },
+
+        QueryName::Select => {
+            let _ = table.select(
+                query.single_arg_1.unwrap(), 
+                query.single_arg_2.unwrap() as usize, 
+                query.list_arg
+                    .into_iter()
+                    .map(|opt_i64| opt_i64.unwrap() as usize)
+                    .collect()
+            );
+        },
+
+        QueryName::SelectVersion => {
+            let _ = table.select_version(
+                query.single_arg_1.unwrap(), 
+                query.single_arg_2.unwrap() as usize, 
+                query.list_arg
+                    .into_iter()
+                    .map(|opt_i64| opt_i64.unwrap() as usize)
+                    .collect(),
+                query.single_arg_3.unwrap()
+            );
+        },
+
+        QueryName::Sum => {
+            let _ = table.sum(
+                query.single_arg_1.unwrap(),
+                query.single_arg_2.unwrap(),
+                query.single_arg_3.unwrap() as usize
+            );
+        },
+
+        QueryName::SumVersion => {
+            let _ = table.sum_version(
+                query.single_arg_1.unwrap(),
+                query.single_arg_2.unwrap(),
+                query.single_arg_3.unwrap() as usize,
+                query.single_arg_4.unwrap()
+            );
+        },
+
+        QueryName::Delete => {
+            let _ = table.delete(query.single_arg_1.unwrap());
+        }
+    };
 }

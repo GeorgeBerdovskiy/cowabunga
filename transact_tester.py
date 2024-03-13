@@ -25,7 +25,7 @@ transact.add_query(query.select, table, 0, 0, [1, 0, 1, 0, 1])
 transact.add_query(query.select_version, table, 0, 0, [1, 0, 1, 0, 1], -5)
 transact.add_query(query.sum, table, 0, 10, 2)
 transact.add_query(query.sum_version, table, 0, 10, 2, -10)
-transact.add_query(query.delete, table, 2)
+# transact.add_query(query.delete, table, 2)
 
 transact_2 = Transaction()
 transact_2.add_query(query.insert, table, *[11, 12, 13, 14, 15])
@@ -36,6 +36,6 @@ worker.run()
 
 print("This is immediately after the worker begins running....")
 
-# worker.join()
+worker.join()
 
 print("...and this is ONLY after the worker is done.")
