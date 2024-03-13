@@ -12,7 +12,7 @@ db.open('./ECS165')
 grades_table = db.get_table('Grades')
 
 # create a query class for the grades table
-query = Query(grades_table)
+query = Query(db, grades_table)
 
 # dictionary for records to test the database: test directory
 records = {}
@@ -40,8 +40,7 @@ for i in range(number_of_transactions):
     transactions.append(Transaction())
 
 for i in range(num_threads):
-    transaction_workers.append(TransactionWorker())
-
+    transaction_workers.append(TransactionWorker(db))
 
 
 
@@ -77,12 +76,11 @@ for i in range(num_threads):
 for i in range(num_threads):
     transaction_workers[i].join()
 
-
 score = len(keys)
 for key in keys:
     try:
         correct = records[key]
-        query = Query(grades_table)
+        query = Query(db, grades_table)
         
         result = query.select(key, 0, [1, 1, 1, 1, 1])[0].columns
         if correct != result:

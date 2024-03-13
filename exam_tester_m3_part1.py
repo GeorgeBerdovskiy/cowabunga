@@ -5,6 +5,15 @@ from lstore.transaction_worker import TransactionWorker
 
 from random import choice, randint, sample, seed
 
+import shutil
+# Delete the old database files
+try:
+    shutil.rmtree("./ECS165")
+    print("Deleted ECS165!")
+except:
+    print("Didn't need to delete ECS165 because it doesn't exist")
+
+
 db = Database()
 db.open('./ECS165')
 
@@ -12,7 +21,7 @@ db.open('./ECS165')
 grades_table = db.create_table('Grades', 5, 0)
 
 # create a query class for the grades table
-query = Query(grades_table)
+query = Query(db, grades_table)
 
 # dictionary for records to test the database: test directory
 records = {}
@@ -48,7 +57,7 @@ for i in range(0, number_of_records):
 
 transaction_workers = []
 for i in range(num_threads):
-    transaction_workers.append(TransactionWorker())
+    transaction_workers.append(TransactionWorker(db))
     
 for i in range(number_of_transactions):
     transaction_workers[i % num_threads].add_transaction(insert_transactions[i])

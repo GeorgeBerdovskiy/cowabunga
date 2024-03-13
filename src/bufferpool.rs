@@ -251,7 +251,7 @@ impl BufferPool {
             next_table_id: self.next_table_id.load(Ordering::SeqCst),
         };
 
-        println!("{:?}", metadata);
+        //println!("{:?}", metadata);
 
         // Next, generate the buffer pool header path
         let metadata_path = format!("{}/bp.hdr", self.directory.read().unwrap());
@@ -396,7 +396,7 @@ impl BufferPool {
 
         // At this point, we failed to get an empty frame (and there will never be an empty frame again)
         // For this reason, we need to check for a frame that we can evict
-        for i in 0..BP_NUM_FRAMES {
+        /*for i in 0..BP_NUM_FRAMES {
             if Arc::strong_count(&self.frames[i]) - 1 == 0 {
                 // The frame in question is only being used by the buffer pool so we can safely evict it
                 // First, get a write lock on it
@@ -426,7 +426,7 @@ impl BufferPool {
                 // Finally, return the index of the frame that now holds this page
                 return i;
             }
-        }
+        }*/
 
         // At this point, we did not find a page that could be evicted either. For that reason,
         // let's just latch onto a random frame until it no longer has any pins

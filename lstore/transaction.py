@@ -33,6 +33,7 @@ class Transaction:
         elif query_name == "sum":
             self.transaction.add_sum(table.id, table.primary_key_index, args[0], args[1], args[2])
         elif query_name == "select_version":
+            print(f"Version {args[-1]}")
             self.transaction.add_select_version(table.id, table.primary_key_index, args[0], args[1], args[2:-1][0], args[-1])
         elif query_name == "sum_verstion":
             self.transaction.add_sum_version(table.id, table.primary_key_index, args[0], args[1], args[2], args[3])

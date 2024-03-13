@@ -458,13 +458,13 @@ impl Table {
     /// Create a new table given its name, number of columns, primary key column index, and shared
     /// buffer pool manager.
     pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, BPM: Arc<Mutex<BufferPool>>) -> Self {
-        println!("DEBUG: about to access BPM");
+        //println!("DEBUG: about to access BPM");
 
-        println!("DEBUG: trying to register table");
+        //println!("DEBUG: trying to register table");
         // TODO problem here
         let table_identifier = BPM.lock().unwrap().register_table_name(&name);
 
-        println!("DEBUG: set bpm dir");
+        //println!("DEBUG: set bpm dir");
 
         // Create the table directory, every column file inside that table, and the header file for every column
         match std::fs::create_dir(format!("{}/{}", directory, table_identifier)) {
@@ -517,7 +517,7 @@ impl Table {
             }
 
             Err(error) => {
-                println!("{:?}", error);
+                //println!("{:?}", error);
 
                 // Table files already exist - load from those disk
                 // Also disregard the `num_columns` and `key_column` arguments

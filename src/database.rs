@@ -83,7 +83,7 @@ impl TransactionManager {
             self.pkeys_in_process.remove(rid);
         }
 
-        println!("[DEBUG] Released all locks for transaction with id {:?}", transaction_id);
+        //println!("[DEBUG] Released all locks for transaction with id {:?}", transaction_id);
     }
 }
 
@@ -223,8 +223,8 @@ impl Database {
         let transaction_mgr_shared = self.transaction_manager.clone();
 
         let new_worker = thread::spawn(move || {
-            println!("[DEBUG] Worker started...");
-            println!("{:?}", tables_shared.lock().unwrap().len());
+            //println!("[DEBUG] Worker started...");
+            //println!("{:?}", tables_shared.lock().unwrap().len());
 
             // Next, we will continuously pop and check if we can run the transaction
             // If we can, we'll send it to the "run_transaction" function. Otherwise,
@@ -232,37 +232,46 @@ impl Database {
 
             while transactions.len() > 0 {
                 let next_transaction = transactions.pop_front().unwrap();
-                println!("[DEBUG] Checking transaction compatability...");
+                //println!("[DEBUG] Checking transaction compatability...");
 
                 let (abort_kind, transaction_id) = confirm_transaction_compatability(tables_shared.clone(), transaction_mgr_shared.clone(), next_transaction.clone());
-                println!("[DEBUG] Compatability check done! {:?} + {:?}", abort_kind, transaction_id);
+                //println!("{:?} + {:?}", abort_kind, transaction_id);
+                //println!("[DEBUG] Compatability check done! {:?} + {:?}", abort_kind, transaction_id);
 
                 if abort_kind == AbortKind::Temporary {
-                    let transaction_retry = Transaction {
-                        queries: next_transaction.queries.clone(),
-                        try_count: next_transaction.try_count + 1
-                    };
-
-                    transactions.push_back(transaction_retry);
-                } else {
+                    // If we've failed three or more times, don't try it again
+                    if next_transaction.try_count < 10 {
+                        // We've failed less than three (or four ??) times
+                        let transaction_retry = Transaction {
+                            queries: next_transaction.queries.clone(),
+                            try_count: next_transaction.try_count + 1
+                        };
+    
+                        transactions.push_back(transaction_retry);
+                    } else {
+                        println!("[WARNING] Dropping transact because it tried too many times unsuccessfully.");
+                    }
+                } else if abort_kind == AbortKind::None {
                     for query in next_transaction.clone().queries {
                         run_query(tables_shared.clone(), query);
                     }
 
                     transaction_mgr_shared.lock().unwrap().release_transaction(transaction_id);
+                } else {
+                    println!("WARNING - Permanent abort detected.");
                 }
 
-                // thread::sleep(Duration::from_millis(5000));
-                println!("\n[DEBUG] Popped another transaction. The queue is now {:?}\n", next_transaction);
+                //thread::sleep(Duration::from_millis(5000));
+                //println!("\n[DEBUG] Popped another transaction. The queue is now {:?}\n", next_transaction);
             }
 
-            println!("[DEBUG] Worker finished.");
+            //println!("[DEBUG] Worker finished.");
         });
 
         self.running_workers.insert(self.next_worker_id, new_worker);
         self.next_worker_id += 1;
 
-        println!("[DEBUG] Worker registered, returning ID!");
+        //println!("[DEBUG] Worker registered, returning ID!");
         self.next_worker_id - 1
     }
 
@@ -331,6 +340,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                     // We can only update if the last query working on this primary key WASN'T a delete
                     if *query_effect == QueryEffect::Delete {
                         // Will never be able to run this transaction
+                        println!("[DEBUG] Permanently aborting because last query had a delete effect.");
                         return (AbortKind::Permanent, 0);
                     }
                 } else {
@@ -340,6 +350,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                     if matched_rids.len() == 0 {
                         // This record doesn't exist in the database, but it may be added some time
                         // in the future - abort and retry another time
+                        println!("[DEBUG] Temporarily aborting {:?} query because primary key doesn't exist.", query.query);
                         return (AbortKind::Temporary, 0)
                     }
                 }
@@ -351,6 +362,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                 if transact_mgr_lock.pkeys_in_process.get(&old_primary_key).is_some() {
                     // We can only perform this query if no other transactions are working on the record in
                     // question - abort and retry another time
+                    println!("[DEBUG] Temporarily aborting {:?} query because primary key being used somewhere else.", query.query);
                     return (AbortKind::Temporary, 0);
                 }
 
@@ -365,6 +377,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                         if *query_effect != QueryEffect::Delete {
                             // This transaction will fail every time because the primary key is
                             // already in existance locally - abort permamently
+                            println!("[DEBUG] The new primary key {:?} cannot be added because it has already been added in a previous query - aborting permanently.", new_pkey);
                             return (AbortKind::Permanent, 0);
                         }
                     }
@@ -375,6 +388,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                     if transact_mgr_lock.pkeys_in_process.get(&new_pkey).is_some() {
                         // We can only perform this query if this primary key is absent from all other running transactions
                         // However, if this record is deleted at some point, we will be able to run this query - abort and retry
+                        println!("[DEBUG] Temporarily aborting {:?} query because new primary key is present in shared pool.", query.query);
                         return (AbortKind::Temporary, 0);
                     }
 
@@ -384,6 +398,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                     if matching_rids.len() > 0 {
                         // This primary key already exists in the database - we can't perform it now,
                         // but we might be able to in the future (if it's deleted or updated)
+                        println!("[DEBUG] Temporarily aborting {:?} query because primary key already exists in database.", query.query);
                         return (AbortKind::Temporary, 0);
                     }
                     
@@ -392,7 +407,9 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                 }
 
                 // At this point, we know this entire query is compatible!
-                transact_local_pkey_compat.insert(old_primary_key, QueryEffect::Delete);
+                transact_local_pkey_compat.insert(old_primary_key, QueryEffect::Modify);
+
+                println!("[DEBUG] Update successful!");
             },
 
             QueryName::Select => {
@@ -485,7 +502,8 @@ pub fn run_query(tables: Arc<Mutex<Vec<Table>>>, query: Query) {
         },
 
         QueryName::Update => {
-            table.update(query.single_arg_1.unwrap(), query.list_arg);
+            println!("{:?}", query.list_arg);
+            println!("{:?}", table.update(query.single_arg_1.unwrap(), query.list_arg));
         },
 
         QueryName::Select => {

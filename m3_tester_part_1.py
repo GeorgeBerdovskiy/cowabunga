@@ -4,6 +4,15 @@ from lstore.transaction import Transaction
 from lstore.transaction_worker import TransactionWorker
 
 from random import choice, randint, sample, seed
+from time import process_time
+
+import shutil
+# Delete the old database files
+try:
+    shutil.rmtree("./ECS165")
+    print("Deleted ECS165!")
+except:
+    print("Didn't need to delete ECS165 because it doesn't exist")
 
 db = Database()
 db.open('./ECS165')
@@ -17,7 +26,7 @@ query = Query(db, grades_table)
 # dictionary for records to test the database: test directory
 records = {}
 
-number_of_records = 1000
+number_of_records = 10000
 number_of_transactions = 100
 num_threads = 8
 
@@ -48,13 +57,14 @@ for i in range(0, number_of_records):
 
 transaction_workers = []
 for i in range(num_threads):
-    transaction_workers.append(TransactionWorker())
+    transaction_workers.append(TransactionWorker(db))
     
 for i in range(number_of_transactions):
     transaction_workers[i % num_threads].add_transaction(insert_transactions[i])
 
 
 
+insert_time_0 = process_time()
 # run transaction workers
 for i in range(num_threads):
     transaction_workers[i].run()
@@ -62,7 +72,9 @@ for i in range(num_threads):
 # wait for workers to finish
 for i in range(num_threads):
     transaction_workers[i].join()
+insert_time_1 = process_time()
 
+print("Inserting 10k records took:  \t\t\t", insert_time_1 - insert_time_0)
 
 # Check inserted records using select query in the main thread outside workers
 for key in keys:

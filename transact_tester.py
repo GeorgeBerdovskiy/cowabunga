@@ -32,10 +32,13 @@ transact_2.add_query(query.insert, table, *[11, 12, 13, 14, 15])
 transact_2.add_query(query.delete, table, 2)
 
 worker = TransactionWorker(db, [transact, transact_2])
+worker_2 = TransactionWorker(db, [transact_2])
 worker.run()
+worker_2.run()
 
 print("This is immediately after the worker begins running....")
 
 worker.join()
+worker_2.join()
 
 print("...and this is ONLY after the worker is done.")
