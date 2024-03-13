@@ -303,7 +303,7 @@ pub struct Table {
     pub num_columns: usize,
 
     /// Index of the primary key column.
-    key_column: usize,
+    pub key_column: usize,
 
     /// Next available RID.
     next_rid: AtomicUsize,
@@ -892,6 +892,10 @@ impl Table {
         }
 
         Ok(results)
+    }
+
+    pub fn locate_range(&self, start: i64, end: i64, key_col: usize) -> Vec<usize> {
+        self.indexer.read().unwrap().locate_range(start, end, key_col)
     }
 
     /// Given the start and end of an (inclusive) range, find all entries with primary keys

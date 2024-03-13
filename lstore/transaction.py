@@ -25,19 +25,19 @@ class Transaction:
         query_name = query.__name__
 
         if query_name == "insert":
-            self.transaction.add_insert(table.id, list(args))
+            self.transaction.add_insert(table.id, table.primary_key_index, list(args))
         elif query_name == "update":
-            self.transaction.add_update(table.id, args[0], list(args[1:]))
+            self.transaction.add_update(table.id, table.primary_key_index, args[0], list(args[1:]))
         elif query_name == "select":
-            self.transaction.add_select(table.id, args[0], args[1], args[2:][0])
+            self.transaction.add_select(table.id, table.primary_key_index, args[0], args[1], args[2:][0])
         elif query_name == "sum":
-            self.transaction.add_sum(table.id, args[0], args[1], args[2])
+            self.transaction.add_sum(table.id, table.primary_key_index, args[0], args[1], args[2])
         elif query_name == "select_version":
-            self.transaction.add_select_version(table.id, args[0], args[1], args[2:-1][0], args[-1])
+            self.transaction.add_select_version(table.id, table.primary_key_index, args[0], args[1], args[2:-1][0], args[-1])
         elif query_name == "sum_verstion":
-            self.transaction.add_sum_version(table.id, args[0], args[1], args[2], args[3])
+            self.transaction.add_sum_version(table.id, table.primary_key_index, args[0], args[1], args[2], args[3])
         elif query_name == "delete":
-            self.transaction.add_delete(table.id, args[0])
+            self.transaction.add_delete(table.id, table.primary_key_index, args[0])
         
     # If you choose to implement this differently this method must still return True if transaction commits or False on abort
     def run(self):

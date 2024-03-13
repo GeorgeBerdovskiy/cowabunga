@@ -25,15 +25,14 @@ class TransactionWorker:
     Runs all transaction as a thread
     """
     def run(self):
-        self.db.db.run_worker(self.transactions)
+        self.worker_id = self.db.db.run_worker(list(map(lambda transact: transact.transaction, self.transactions)))
     
 
     """
     Waits for the worker to finish
     """
     def join(self):
-        pass
-
+        self.db.db.join_worker(self.worker_id)
 
     def __run(self):
         for transaction in self.transactions:
