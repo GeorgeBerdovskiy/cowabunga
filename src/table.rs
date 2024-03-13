@@ -858,6 +858,7 @@ impl Table {
                 // Increment the RID for the next record
                 self.next_rid.fetch_add(1, Ordering::SeqCst);
 
+                //println!("[TABLE][861] Successfully updated {:?} to {:?}", key, columns);
                 return true;
             }
 

@@ -11,6 +11,7 @@ class Transaction:
     def __init__(self):
         # self.queries = []
         self.transaction = transaction_module.Transaction()
+        self.query_count = 0
         pass
 
     """
@@ -24,6 +25,8 @@ class Transaction:
         args = list(args)
         query_name = query.__name__
 
+        self.query_count += 1
+
         if query_name == "insert":
             self.transaction.add_insert(table.id, table.primary_key_index, list(args))
         elif query_name == "update":
@@ -33,12 +36,14 @@ class Transaction:
         elif query_name == "sum":
             self.transaction.add_sum(table.id, table.primary_key_index, args[0], args[1], args[2])
         elif query_name == "select_version":
-            print(f"Version {args[-1]}")
+            #print(f"Version {args[-1]}")
             self.transaction.add_select_version(table.id, table.primary_key_index, args[0], args[1], args[2:-1][0], args[-1])
         elif query_name == "sum_verstion":
             self.transaction.add_sum_version(table.id, table.primary_key_index, args[0], args[1], args[2], args[3])
         elif query_name == "delete":
             self.transaction.add_delete(table.id, table.primary_key_index, args[0])
+        else:
+            self.query_count -= 1
         
     # If you choose to implement this differently this method must still return True if transaction commits or False on abort
     def run(self):

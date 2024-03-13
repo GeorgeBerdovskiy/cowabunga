@@ -223,7 +223,15 @@ impl Database {
         let transaction_mgr_shared = self.transaction_manager.clone();
 
         let new_worker = thread::spawn(move || {
-            //println!("[DEBUG] Worker started...");
+            let mut query_count = 0;
+
+            for transaction in &transactions {
+                for query in &transaction.queries {
+                    query_count += 1;
+                }
+            }
+
+            //println!("[DEBUG] Worker started with {:?} transactions and {:?} TOTAL queries.", transactions.len(), query_count);
             //println!("{:?}", tables_shared.lock().unwrap().len());
 
             // Next, we will continuously pop and check if we can run the transaction
@@ -258,7 +266,7 @@ impl Database {
 
                     transaction_mgr_shared.lock().unwrap().release_transaction(transaction_id);
                 } else {
-                    println!("WARNING - Permanent abort detected.");
+                    //println!("WARNING - Permanent abort detected.");
                 }
 
                 //thread::sleep(Duration::from_millis(5000));
@@ -350,7 +358,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                     if matched_rids.len() == 0 {
                         // This record doesn't exist in the database, but it may be added some time
                         // in the future - abort and retry another time
-                        println!("[DEBUG] Temporarily aborting {:?} query because primary key doesn't exist.", query.query);
+                        //println!("[DEBUG] Temporarily aborting {:?} query because primary key doesn't exist.", query.query);
                         return (AbortKind::Temporary, 0)
                     }
                 }
@@ -362,7 +370,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                 if transact_mgr_lock.pkeys_in_process.get(&old_primary_key).is_some() {
                     // We can only perform this query if no other transactions are working on the record in
                     // question - abort and retry another time
-                    println!("[DEBUG] Temporarily aborting {:?} query because primary key being used somewhere else.", query.query);
+                    //println!("[DEBUG] Temporarily aborting {:?} query because primary key being used somewhere else.", query.query);
                     return (AbortKind::Temporary, 0);
                 }
 
@@ -388,7 +396,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                     if transact_mgr_lock.pkeys_in_process.get(&new_pkey).is_some() {
                         // We can only perform this query if this primary key is absent from all other running transactions
                         // However, if this record is deleted at some point, we will be able to run this query - abort and retry
-                        println!("[DEBUG] Temporarily aborting {:?} query because new primary key is present in shared pool.", query.query);
+                        //println!("[DEBUG] Temporarily aborting {:?} query because new primary key is present in shared pool.", query.query);
                         return (AbortKind::Temporary, 0);
                     }
 
@@ -398,7 +406,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                     if matching_rids.len() > 0 {
                         // This primary key already exists in the database - we can't perform it now,
                         // but we might be able to in the future (if it's deleted or updated)
-                        println!("[DEBUG] Temporarily aborting {:?} query because primary key already exists in database.", query.query);
+                        //println!("[DEBUG] Temporarily aborting {:?} query because primary key already exists in database.", query.query);
                         return (AbortKind::Temporary, 0);
                     }
                     
@@ -409,7 +417,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                 // At this point, we know this entire query is compatible!
                 transact_local_pkey_compat.insert(old_primary_key, QueryEffect::Modify);
 
-                println!("[DEBUG] Update successful!");
+                //println!("[DEBUG] Update successful!");
             },
 
             QueryName::Select => {
@@ -502,8 +510,8 @@ pub fn run_query(tables: Arc<Mutex<Vec<Table>>>, query: Query) {
         },
 
         QueryName::Update => {
-            println!("{:?}", query.list_arg);
-            println!("{:?}", table.update(query.single_arg_1.unwrap(), query.list_arg));
+            //println!("{:?}", query.list_arg);
+            table.update(query.single_arg_1.unwrap(), query.list_arg);
         },
 
         QueryName::Select => {

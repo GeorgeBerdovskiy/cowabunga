@@ -39,6 +39,8 @@ pub struct Transaction {
 impl Transaction {
     #[new]
     pub fn new() -> Self {
+        //println!("[DEBUG] Creating a new transaction!");
+
         Transaction {
             queries: Vec::new(),
             try_count: 0
@@ -64,6 +66,8 @@ impl Transaction {
     }
 
     pub fn add_update(&mut self, table: usize, primary_key_index: usize, primary_key: i64, args: Vec<Option<i64>>) {
+        //println!("[DEBUG] Adding update with prim. key {:?}", primary_key);
+
         self.queries.push(Query {
             query: QueryName::Update,
             table: table,

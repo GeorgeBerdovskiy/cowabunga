@@ -5,6 +5,8 @@ from lstore.transaction_worker import TransactionWorker
 
 from random import choice, randint, sample, seed
 
+import copy
+
 db = Database()
 db.open('./ECS165')
 
@@ -20,7 +22,7 @@ records = {}
 number_of_records = 1000
 number_of_transactions = 100
 number_of_operations_per_record = 1
-num_threads = 4
+num_threads = 8
 
 keys = []
 records = {}
@@ -61,14 +63,14 @@ for j in range(number_of_operations_per_record):
         transactions[key % number_of_transactions].add_query(query.update, grades_table, key, *updated_columns)
 print("Update finished")
 
+# print(f"There are {len(transaction_workers)} transaction workers")
 # add trasactions to transaction workers  
 for i in range(number_of_transactions):
     transaction_workers[i % num_threads].add_transaction(transactions[i])
 
-
-
 # run transaction workers
 for i in range(num_threads):
+    # print(f"Running worker {i}")
     transaction_workers[i].run()
 
 # wait for workers to finish
@@ -81,7 +83,7 @@ for key in keys:
     correct = records[key]
     query = Query(db, grades_table)
     
-    result = query.select_version(key, 0, [1, 1, 1, 1, 1], -4)[0].columns
+    result = query.select_version(key, 0, [1, 1, 1, 1, 1], -1)[0].columns
     if correct != result:
         print('select error on primary key', key, ':', result, ', correct:', correct)
         score -= 1
@@ -92,7 +94,7 @@ for key in keys:
     correct = records[key]
     query = Query(db, grades_table)
     
-    result = query.select_version(key, 0, [1, 1, 1, 1, 1], -8)[0].columns
+    result = query.select_version(key, 0, [1, 1, 1, 1, 1], -2)[0].columns
     if correct != result:
         # print('select error on primary key', key, ':', result, ', correct:', correct)
         v2_score -= 1
