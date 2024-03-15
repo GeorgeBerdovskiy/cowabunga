@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::table::RID;
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::{default, fs};
 
 use std::thread::{self, JoinHandle};
@@ -37,7 +37,7 @@ pub struct Database {
     directory: Option<String>,
 
     /// Tables created in this database.
-    tables: Arc<Mutex<Vec<Table>>>,
+    tables: Arc<RwLock<Vec<Table>>>,
 
     /// Buffer pool manager shared by all tables in this database.
     bpm: Arc<BufferPool>,
@@ -108,7 +108,7 @@ impl Database {
         // Create the database
         Database {
             directory: Some("./COW_DAT".to_string()),
-            tables: Arc::new(Mutex::new(Vec::new())),
+            tables: Arc::new(RwLock::new(Vec::new())),
             loaded: false,
             bpm: Arc::new(BufferPool::new()),
             next_worker_id: 0,
@@ -125,7 +125,7 @@ impl Database {
 
     /// Persist all tables in this directory, as well as its buffer pool manager.
     pub fn close(&self) {
-        for table in self.tables.lock().unwrap().iter() {
+        for table in self.tables.write().unwrap().iter() {
             table.persist();
         }
 
@@ -136,7 +136,7 @@ impl Database {
     pub fn create_table(&mut self, name: String, num_columns: usize, key_index: usize) -> PyTableProxy {
         let table = Table::new(self.directory.as_ref().unwrap().clone(), name, num_columns, key_index, self.bpm.clone());
         
-        let mut tables_lock = self.tables.lock().unwrap();
+        let mut tables_lock = self.tables.write().unwrap();
         tables_lock.push(table);
 
         PyTableProxy {
@@ -155,7 +155,7 @@ impl Database {
     pub fn get_table(&mut self, name: String) -> PyTableProxy {
         let table = Table::new(self.directory.as_ref().unwrap().clone(), name, 0, 0, self.bpm.clone());
         
-        let mut tables_lock = self.tables.lock().unwrap();
+        let mut tables_lock = self.tables.write().unwrap();
         tables_lock.push(table);
         
         PyTableProxy {
@@ -171,37 +171,37 @@ impl Database {
 
     /// Insert a new record in the specified table.
     pub fn insert(&self, table: usize, columns: Vec<i64>) -> bool {
-        self.tables.lock().unwrap()[table].insert(columns)
+        self.tables.read().unwrap()[table].insert(columns)
     }
 
     /// Update a record in the specified table given its primary key.
     pub fn update(&self, table: usize, primary_key: i64, columns: Vec<Option<i64>>) -> bool {
-        self.tables.lock().unwrap()[table].update(primary_key, columns)
+        self.tables.read().unwrap()[table].update(primary_key, columns)
     }
 
     /// Select records given a search key and a projection vector.
     pub fn select(&self, table: usize, search_key: i64, search_key_index: usize, projected_columns: Vec<usize>) -> PyResult<Vec<PyRecord>> {
-        self.tables.lock().unwrap()[table].select(search_key, search_key_index, projected_columns)
+        self.tables.read().unwrap()[table].select(search_key, search_key_index, projected_columns)
     }
 
     /// Sum records given a range of primary keys and the column being aggregated.
     pub fn sum(&self, table: usize, start_range: i64, end_range: i64, column_index: usize) -> PyResult<i64> {
-        self.tables.lock().unwrap()[table].sum(start_range, end_range, column_index)
+        self.tables.read().unwrap()[table].sum(start_range, end_range, column_index)
     }
 
     /// Select records given a search key, projection vector, and version.
     pub fn select_version(&self, table: usize, search_key: i64, search_key_index: usize, proj: Vec<usize>, relative_version: i64) -> PyResult<Vec<PyRecord>> {
-        self.tables.lock().unwrap()[table].select_version(search_key, search_key_index, proj, relative_version)
+        self.tables.read().unwrap()[table].select_version(search_key, search_key_index, proj, relative_version)
     }
 
     /// Sum records given a range of primary keys, the column being aggregated, and the version.
     pub fn sum_version(&self, table: usize, start_range: i64, end_range: i64, column_index: usize, relative_version: i64) -> PyResult<i64> {
-        self.tables.lock().unwrap()[table].sum_version(start_range, end_range, column_index, relative_version)
+        self.tables.read().unwrap()[table].sum_version(start_range, end_range, column_index, relative_version)
     }
 
     /// Delete a record given its table and primary key.
     pub fn delete(&self, table: usize, primary_key: i64) -> PyResult<()> {
-        self.tables.lock().unwrap()[table].delete(primary_key)
+        self.tables.read().unwrap()[table].delete(primary_key)
     }
 
     pub fn run_worker(&mut self, transactions: Vec<&PyAny>) -> usize {
@@ -265,6 +265,7 @@ impl Database {
                     }
 
                     transaction_mgr_shared.lock().unwrap().release_transaction(transaction_id);
+
                 } else {
                     //println!("WARNING - Permanent abort detected.");
                 }
@@ -293,7 +294,7 @@ impl Database {
 
 /// Confirm that this transaction is compatible with all currently running queries
 // TODO - Refactor this to return an enum or something... this is hacky and unpleasant
-pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transaction_mgr: Arc<Mutex<TransactionManager>>, transaction: Transaction) -> (AbortKind, TransactionID) {
+pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transaction_mgr: Arc<Mutex<TransactionManager>>, transaction: Transaction) -> (AbortKind, TransactionID) {
     // Acquire transaction manager lock
     let mut transact_mgr_lock = transaction_mgr.lock().unwrap();
 
@@ -323,7 +324,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
 
                 // This query is compatible with all the currently running transactions as well! Finally,
                 // is it compatible with the database in its current state?
-                let matched_rids = tables.lock().unwrap()[query.table].locate_range(primary_key, primary_key, query.primary_key_index);
+                let matched_rids = tables.read().unwrap()[query.table].locate_range(primary_key, primary_key, query.primary_key_index);
                 if matched_rids.len() > 0 {
                     // This primary key already exists in the database - we can't perform it now,
                     // but we might be able to in the future (if it's deleted or updated)
@@ -354,7 +355,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
                 } else {
                     // Primary key wasn't added in this transaction, so it must have been
                     // added earlier and is in the database... right?
-                    let matched_rids = tables.lock().unwrap()[query.table].locate_range(old_primary_key, old_primary_key, query.primary_key_index);
+                    let matched_rids = tables.read().unwrap()[query.table].locate_range(old_primary_key, old_primary_key, query.primary_key_index);
                     if matched_rids.len() == 0 {
                         // This record doesn't exist in the database, but it may be added some time
                         // in the future - abort and retry another time
@@ -402,7 +403,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
 
                     // This query is compatible with all the currently running transactions as well! Finally,
                     // is it compatible with the database in its current state?
-                    let matching_rids = tables.lock().unwrap()[query.table].locate_range(new_pkey, new_pkey, query.primary_key_index);
+                    let matching_rids = tables.read().unwrap()[query.table].locate_range(new_pkey, new_pkey, query.primary_key_index);
                     if matching_rids.len() > 0 {
                         // This primary key already exists in the database - we can't perform it now,
                         // but we might be able to in the future (if it's deleted or updated)
@@ -444,7 +445,7 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
 
                 // Preemtively grab the matching RIDs from the database
                 let primary_key = query.single_arg_1.unwrap();
-                let matching_rids = tables.lock().unwrap()[query.table].locate_range(primary_key, primary_key, query.primary_key_index);
+                let matching_rids = tables.read().unwrap()[query.table].locate_range(primary_key, primary_key, query.primary_key_index);
 
                 // Let's start with the first condition - has this transaction created the primary key?
                 match transact_local_pkey_compat.get(&primary_key) {
@@ -496,8 +497,8 @@ pub fn confirm_transaction_compatability(tables: Arc<Mutex<Vec<Table>>>, transac
     (AbortKind::None, id)
 }
 
-pub fn run_query(tables: Arc<Mutex<Vec<Table>>>, query: Query) {
-    let table = &tables.lock().unwrap()[query.table];
+pub fn run_query(tables: Arc<RwLock<Vec<Table>>>, query: Query) {
+    let table = &tables.read().unwrap()[query.table];
 
     match query.query {
         QueryName::Insert => {
