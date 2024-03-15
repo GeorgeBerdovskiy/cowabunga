@@ -37,7 +37,7 @@ def correctness_tester1():
         query.insert(*record)
     try:
         # select on columns with index
-        # test_table.index.create_index(2)
+        test_table.index.create_index(2)
         result = reorganize_result(query.select(1, 2, [1,1,1,1,1]))
         if len(result) == 4:
             if records[0] in result and records[1] in result and records[5] in result and records[7] in result:
@@ -51,7 +51,7 @@ def correctness_tester1():
 
     try:
         # select on columns without index and return 1 record
-        # test_table.index.drop_index(2)
+        test_table.index.drop_index(2)
         result = reorganize_result(query.select(3, 2, [1,1,1,1,1]))
         if len(result) == 1 and records[2] in result:
             print("PASS[1]")

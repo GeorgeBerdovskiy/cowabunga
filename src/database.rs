@@ -1,29 +1,23 @@
 use pyo3::prelude::*;
 
-use crate::table::{PyRecord, Table};
+use crate::table::{PyIndexProxy, PyRecord, Table};
 use crate::bufferpool::BufferPool;
-use crate::transaction::{self, Transaction, Query, QueryName};
-use std::time::Duration;
-use crate::table::RID;
+use crate::table::PyTableProxy;
+use crate::transactions::{
+    TransactionManager,
+    TransactionID,
+    Transaction,
+    Query, 
+    QueryEffect,
+    QueryName
+};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
-use std::{default, fs};
-
 use std::thread::{self, JoinHandle};
+use std::fs;
 
-#[pyclass]
-pub struct PyTableProxy {
-    #[pyo3(get)]
-    id: usize,
-
-    #[pyo3(get)]
-    num_columns: usize,
-
-    #[pyo3(get)]
-    primary_key_index: usize
-}
-
+/// The kind of abort that should be performed after lock acquisiton attempt.
 #[derive(Debug, PartialEq)]
 pub enum AbortKind {
     Permanent,
@@ -31,6 +25,8 @@ pub enum AbortKind {
     None
 }
 
+/// Represents a database. Wrapped by Python class `Database` and used to route
+/// queries into their respective tables.
 #[pyclass]
 pub struct Database {
     /// Current working directory (changes whenever `open` is called).
@@ -42,57 +38,14 @@ pub struct Database {
     /// Buffer pool manager shared by all tables in this database.
     bpm: Arc<BufferPool>,
 
-    /// Describes whether data has been loaded from the disk.
-    loaded: bool,
-
+    /// Contains all currently running transaction workers, mapping their IDs to their join handles.
     running_workers: HashMap<usize, JoinHandle<()>>,
 
+    /// Next available worker ID.
     next_worker_id: usize,
 
+    /// Shared transaction manager used for record lock acquisition.
     transaction_manager: Arc<Mutex<TransactionManager>>
-}
-
-pub type Counter = usize;
-pub type TransactionID = usize;
-
-struct TransactionManager {
-    transactions_in_process: HashMap<TransactionID, Vec<i64>>,
-    next_transaction_id: TransactionID,
-    pkeys_in_process: HashMap<i64, QueryEffect>,
-}
-
-impl TransactionManager {
-    pub fn new() -> Self {
-        TransactionManager {
-            transactions_in_process: HashMap::new(),
-            next_transaction_id: 0,
-            pkeys_in_process: HashMap::new()
-        }
-    }
-
-    pub fn register_transaction_with(&mut self, pkeys: Vec<i64>) -> TransactionID {
-        self.transactions_in_process.insert(self.next_transaction_id, pkeys);
-        self.next_transaction_id += 1;
-        self.next_transaction_id - 1
-    }
-
-    pub fn release_transaction(&mut self, transaction_id: TransactionID) {
-        let associated_rids = &self.transactions_in_process[&transaction_id];
-
-        for rid in associated_rids {
-            self.pkeys_in_process.remove(rid);
-        }
-
-        //println!("[DEBUG] Released all locks for transaction with id {:?}", transaction_id);
-    }
-}
-
-#[derive(PartialEq, Debug, Copy, Clone)]
-enum QueryEffect {
-    Create, // Insert queries
-    Modify, // Update queries
-    Read,   // Select, select version, sum, and sum version queries
-    Delete  // Delete
 }
 
 #[pymethods]
@@ -109,7 +62,6 @@ impl Database {
         Database {
             directory: Some("./COW_DAT".to_string()),
             tables: Arc::new(RwLock::new(Vec::new())),
-            loaded: false,
             bpm: Arc::new(BufferPool::new()),
             next_worker_id: 0,
             running_workers: HashMap::new(),
@@ -142,7 +94,8 @@ impl Database {
         PyTableProxy {
             id: tables_lock.len() - 1,
             num_columns: tables_lock[tables_lock.len() - 1].num_columns,
-            primary_key_index: tables_lock[tables_lock.len() - 1].key_column
+            primary_key_index: tables_lock[tables_lock.len() - 1].key_column,
+            index: PyIndexProxy
         }
     }
 
@@ -161,7 +114,8 @@ impl Database {
         PyTableProxy {
             id: tables_lock.len() - 1,
             num_columns: tables_lock[tables_lock.len() - 1].num_columns,
-            primary_key_index: tables_lock[tables_lock.len() - 1].key_column
+            primary_key_index: tables_lock[tables_lock.len() - 1].key_column,
+            index: PyIndexProxy
         }
     }
 
@@ -204,15 +158,13 @@ impl Database {
         self.tables.read().unwrap()[table].delete(primary_key)
     }
 
+    /// Run a transaction worker given its list of transactions (from Python).
     pub fn run_worker(&mut self, transactions: Vec<&PyAny>) -> usize {
         // First, convert the input into something Rust can work on
         let mut transactions: VecDeque<Transaction> = transactions
             .iter()
             .map(|py_obj| {
-                // Convert PyObject to PyRef
                 let py_ref: PyRef<Transaction> = py_obj.extract().unwrap();
-                // Now, you can use py_ref or convert it to Transaction if your Transaction type supports it
-                // For example, assuming Transaction implements From<PyRef<Transaction>>
                 py_ref.clone()
             })
             .collect();
@@ -221,33 +173,18 @@ impl Database {
         let transaction_mgr_shared = self.transaction_manager.clone();
 
         let new_worker = thread::spawn(move || {
-            let mut query_count = 0;
-
-            for transaction in &transactions {
-                for query in &transaction.queries {
-                    query_count += 1;
-                }
-            }
-
-            //println!("[DEBUG] Worker started with {:?} transactions and {:?} TOTAL queries.", transactions.len(), query_count);
-            //println!("{:?}", tables_shared.lock().unwrap().len());
-
             // Next, we will continuously pop and check if we can run the transaction
             // If we can, we'll send it to the "run_transaction" function. Otherwise,
             // we'll send it to the back of the queue
 
             while transactions.len() > 0 {
                 let next_transaction = transactions.pop_front().unwrap();
-                //println!("[DEBUG] Checking transaction compatability...");
-
                 let (abort_kind, transaction_id) = confirm_transaction_compatability(tables_shared.clone(), transaction_mgr_shared.clone(), next_transaction.clone());
-                //println!("{:?} + {:?}", abort_kind, transaction_id);
-                //println!("[DEBUG] Compatability check done! {:?} + {:?}", abort_kind, transaction_id);
 
                 if abort_kind == AbortKind::Temporary {
                     // If we've failed three or more times, don't try it again
                     if next_transaction.try_count < 10 {
-                        // We've failed less than three (or four ??) times
+                        // We've failed less than ten times - retry another time
                         let transaction_retry = Transaction {
                             queries: next_transaction.queries.clone(),
                             try_count: next_transaction.try_count + 1
@@ -263,25 +200,17 @@ impl Database {
                     }
 
                     transaction_mgr_shared.lock().unwrap().release_transaction(transaction_id);
-
-                } else {
-                    //println!("WARNING - Permanent abort detected.");
                 }
-
-                //thread::sleep(Duration::from_millis(5000));
-                //println!("\n[DEBUG] Popped another transaction. The queue is now {:?}\n", next_transaction);
             }
-
-            //println!("[DEBUG] Worker finished.");
         });
 
         self.running_workers.insert(self.next_worker_id, new_worker);
         self.next_worker_id += 1;
 
-        //println!("[DEBUG] Worker registered, returning ID!");
         self.next_worker_id - 1
     }
 
+    /// Waits for a transaction worker to finish and then returns.
     pub fn join_worker(&mut self, worker_id: usize) {
         let worker = self.running_workers.remove(&worker_id);
         if worker.is_some() {
@@ -290,21 +219,22 @@ impl Database {
     }
 }
 
-/// Confirm that this transaction is compatible with all currently running queries
-// TODO - Refactor this to return an enum or something... this is hacky and unpleasant
+/// Confirm that this transaction is compatible with all currently running queries. If it is, acquire locks on all
+/// requested records. Only one transaction can check for compatability and acquire locks at a time.
+// TODO - Refactor this to return an enum... this is hacky and unpleasant
 pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transaction_mgr: Arc<Mutex<TransactionManager>>, transaction: Transaction) -> (AbortKind, TransactionID) {
     // Acquire transaction manager lock
     let mut transact_mgr_lock = transaction_mgr.lock().unwrap();
 
     // Initialize transaction-local hash for compatability
-    let mut transact_local_pkey_compat: HashMap<i64, QueryEffect> = HashMap::new();
+    let mut transact_local_pkey_compat: HashMap<i64, (QueryEffect, usize)> = HashMap::new();
 
     for query in transaction.queries {
         match query.query {
             QueryName::Insert => {
                 let primary_key = query.list_arg[query.primary_key_index].unwrap();
-                if let Some(query_effect) = transact_local_pkey_compat.get(&primary_key) {
-                    if *query_effect != QueryEffect::Delete {
+                if let Some((query_effect, table_id)) = transact_local_pkey_compat.get(&primary_key) {
+                    if *query_effect != QueryEffect::Delete && *table_id == query.table {
                         // This transaction will fail every time because the primary key is
                         // already in existance - abort permamently
                         return (AbortKind::Permanent, 0);
@@ -330,7 +260,7 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                 }
 
                 // This query is compatible!
-                transact_local_pkey_compat.insert(primary_key, QueryEffect::Create);
+                transact_local_pkey_compat.insert(primary_key, (QueryEffect::Create, query.table));
             },
 
             QueryName::Update => {
@@ -343,11 +273,10 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                 // If one of these conditions doesn't hold, we need to abort
 
                 // We'll start with the first condition
-                if let Some(query_effect) = transact_local_pkey_compat.get(&old_primary_key) {
+                if let Some((query_effect, table_id)) = transact_local_pkey_compat.get(&old_primary_key) {
                     // We can only update if the last query working on this primary key WASN'T a delete
-                    if *query_effect == QueryEffect::Delete {
+                    if *query_effect == QueryEffect::Delete && *table_id == query.table {
                         // Will never be able to run this transaction
-                        println!("[DEBUG] Permanently aborting because last query had a delete effect.");
                         return (AbortKind::Permanent, 0);
                     }
                 } else {
@@ -357,7 +286,6 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                     if matched_rids.len() == 0 {
                         // This record doesn't exist in the database, but it may be added some time
                         // in the future - abort and retry another time
-                        //println!("[DEBUG] Temporarily aborting {:?} query because primary key doesn't exist.", query.query);
                         return (AbortKind::Temporary, 0)
                     }
                 }
@@ -369,7 +297,6 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                 if transact_mgr_lock.pkeys_in_process.get(&old_primary_key).is_some() {
                     // We can only perform this query if no other transactions are working on the record in
                     // question - abort and retry another time
-                    //println!("[DEBUG] Temporarily aborting {:?} query because primary key being used somewhere else.", query.query);
                     return (AbortKind::Temporary, 0);
                 }
 
@@ -380,11 +307,10 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                     // User has specified a new primary key - checking it
                     // should be the same as the checking for insert
 
-                    if let Some(query_effect) = transact_local_pkey_compat.get(&new_pkey) {
-                        if *query_effect != QueryEffect::Delete {
+                    if let Some((query_effect, table_id)) = transact_local_pkey_compat.get(&new_pkey) {
+                        if *query_effect != QueryEffect::Delete && *table_id == query.table {
                             // This transaction will fail every time because the primary key is
                             // already in existance locally - abort permamently
-                            println!("[DEBUG] The new primary key {:?} cannot be added because it has already been added in a previous query - aborting permanently.", new_pkey);
                             return (AbortKind::Permanent, 0);
                         }
                     }
@@ -395,7 +321,6 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                     if transact_mgr_lock.pkeys_in_process.get(&new_pkey).is_some() {
                         // We can only perform this query if this primary key is absent from all other running transactions
                         // However, if this record is deleted at some point, we will be able to run this query - abort and retry
-                        //println!("[DEBUG] Temporarily aborting {:?} query because new primary key is present in shared pool.", query.query);
                         return (AbortKind::Temporary, 0);
                     }
 
@@ -405,35 +330,31 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                     if matching_rids.len() > 0 {
                         // This primary key already exists in the database - we can't perform it now,
                         // but we might be able to in the future (if it's deleted or updated)
-                        //println!("[DEBUG] Temporarily aborting {:?} query because primary key already exists in database.", query.query);
                         return (AbortKind::Temporary, 0);
                     }
                     
                     // The query is compatible!
-                    transact_local_pkey_compat.insert(new_pkey, QueryEffect::Create);
+                    transact_local_pkey_compat.insert(new_pkey, (QueryEffect::Create, query.table));
                 }
 
                 // At this point, we know this entire query is compatible!
-                transact_local_pkey_compat.insert(old_primary_key, QueryEffect::Modify);
-
-                //println!("[DEBUG] Update successful!");
+                transact_local_pkey_compat.insert(old_primary_key, (QueryEffect::Modify, query.table));
             },
 
             QueryName::Select => {
-                // Technically, select is always good because it can't violate integrity constraints. Since
-                // we don't need to handle phantoms in this milestone, we choose to add it anyways.
+                // TODO
             },
 
             QueryName::Sum => {
-                // Again, sum is always good because it can't violate integrity constraints
+                // TODO
             },
 
             QueryName::SumVersion => {
-                // Again, sum (version) is always good because it can't violate integrity constraints
+                // TODO
             },
 
             QueryName::SelectVersion => {
-                // Again, select (version) is always good because it can't violate integrity constraints
+                // TODO
             },
 
             QueryName::Delete => {
@@ -447,9 +368,9 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
 
                 // Let's start with the first condition - has this transaction created the primary key?
                 match transact_local_pkey_compat.get(&primary_key) {
-                    Some(effect) => {
+                    Some((effect, table_id)) => {
                         // This transaction has worked on this primary key before! But does it still exist?
-                        if *effect == QueryEffect::Delete {
+                        if *effect == QueryEffect::Delete && *table_id == query.table {
                             // Nope - abort permamently
                             return (AbortKind::Permanent, 0);
                         }
@@ -474,7 +395,7 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                 }
 
                 // We're good to go!
-                transact_local_pkey_compat.insert(primary_key, QueryEffect::Delete);
+                transact_local_pkey_compat.insert(primary_key, (QueryEffect::Delete, query.table));
             }
         }
     }
@@ -495,6 +416,7 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
     (AbortKind::None, id)
 }
 
+/// Run a single query.
 pub fn run_query(tables: Arc<RwLock<Vec<Table>>>, query: Query) {
     let table = &tables.read().unwrap()[query.table];
 
@@ -509,7 +431,6 @@ pub fn run_query(tables: Arc<RwLock<Vec<Table>>>, query: Query) {
         },
 
         QueryName::Update => {
-            //println!("{:?}", query.list_arg);
             table.update(query.single_arg_1.unwrap(), query.list_arg);
         },
 
