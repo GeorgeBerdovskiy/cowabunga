@@ -198,8 +198,10 @@ pub struct TransactionManager {
     /// Next available transaction ID.
     pub next_transaction_id: TransactionID,
 
-    /// Contains all the primary keys currently being worked on (locked).
-    pub pkeys_in_process: HashMap<i64, QueryEffect>,
+    /// Contains all the primary keys currently being worked on (locked). Value is
+    /// a tuple of query effect and table identifier (since transactions may
+    /// work on several tables with overlapping primary keys).
+    pub pkeys_in_process: HashMap<i64, (QueryEffect, usize)>,
 }
 
 impl TransactionManager {

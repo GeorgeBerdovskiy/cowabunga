@@ -15,6 +15,7 @@ except:
 db = Database()
 db.open("./DB_TESTER")
 table = db.create_table("Grades", 5, 0)
+table_s = db.create_table("Students", 4, 0)
 
 query = Query(db, table)
 
@@ -29,9 +30,10 @@ transact.add_query(query.sum_version, table, 0, 10, 2, -10)
 
 transact_2 = Transaction()
 transact_2.add_query(query.insert, table, *[11, 12, 13, 14, 15])
-transact_2.add_query(query.delete, table, 2)
+# transact_2.add_query(query.delete, table, 2)
+transact_2.add_query(query.insert, table_s, *[1, 2, 3, 4])
 
-worker = TransactionWorker(db, [transact, transact_2])
+worker = TransactionWorker(db, [transact])
 worker_2 = TransactionWorker(db, [transact_2])
 worker.run()
 worker_2.run()
@@ -40,5 +42,8 @@ print("This is immediately after the worker begins running....")
 
 worker.join()
 worker_2.join()
+
+query_2 = Query(db, table_s)
+print(query_2.select(1, 0, [1, 1, 1, 1].columns[0]))
 
 print("...and this is ONLY after the worker is done.")

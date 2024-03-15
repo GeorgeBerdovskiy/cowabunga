@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use crate::table::{PyRecord, Table};
+use crate::table::{PyIndexProxy, PyRecord, Table};
 use crate::bufferpool::BufferPool;
 use crate::table::PyTableProxy;
 use crate::transactions::{
@@ -94,7 +94,8 @@ impl Database {
         PyTableProxy {
             id: tables_lock.len() - 1,
             num_columns: tables_lock[tables_lock.len() - 1].num_columns,
-            primary_key_index: tables_lock[tables_lock.len() - 1].key_column
+            primary_key_index: tables_lock[tables_lock.len() - 1].key_column,
+            index: PyIndexProxy
         }
     }
 
@@ -113,7 +114,8 @@ impl Database {
         PyTableProxy {
             id: tables_lock.len() - 1,
             num_columns: tables_lock[tables_lock.len() - 1].num_columns,
-            primary_key_index: tables_lock[tables_lock.len() - 1].key_column
+            primary_key_index: tables_lock[tables_lock.len() - 1].key_column,
+            index: PyIndexProxy
         }
     }
 
@@ -225,14 +227,14 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
     let mut transact_mgr_lock = transaction_mgr.lock().unwrap();
 
     // Initialize transaction-local hash for compatability
-    let mut transact_local_pkey_compat: HashMap<i64, QueryEffect> = HashMap::new();
+    let mut transact_local_pkey_compat: HashMap<i64, (QueryEffect, usize)> = HashMap::new();
 
     for query in transaction.queries {
         match query.query {
             QueryName::Insert => {
                 let primary_key = query.list_arg[query.primary_key_index].unwrap();
-                if let Some(query_effect) = transact_local_pkey_compat.get(&primary_key) {
-                    if *query_effect != QueryEffect::Delete {
+                if let Some((query_effect, table_id)) = transact_local_pkey_compat.get(&primary_key) {
+                    if *query_effect != QueryEffect::Delete && *table_id == query.table {
                         // This transaction will fail every time because the primary key is
                         // already in existance - abort permamently
                         return (AbortKind::Permanent, 0);
@@ -258,7 +260,7 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                 }
 
                 // This query is compatible!
-                transact_local_pkey_compat.insert(primary_key, QueryEffect::Create);
+                transact_local_pkey_compat.insert(primary_key, (QueryEffect::Create, query.table));
             },
 
             QueryName::Update => {
@@ -271,9 +273,9 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                 // If one of these conditions doesn't hold, we need to abort
 
                 // We'll start with the first condition
-                if let Some(query_effect) = transact_local_pkey_compat.get(&old_primary_key) {
+                if let Some((query_effect, table_id)) = transact_local_pkey_compat.get(&old_primary_key) {
                     // We can only update if the last query working on this primary key WASN'T a delete
-                    if *query_effect == QueryEffect::Delete {
+                    if *query_effect == QueryEffect::Delete && *table_id == query.table {
                         // Will never be able to run this transaction
                         return (AbortKind::Permanent, 0);
                     }
@@ -305,8 +307,8 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                     // User has specified a new primary key - checking it
                     // should be the same as the checking for insert
 
-                    if let Some(query_effect) = transact_local_pkey_compat.get(&new_pkey) {
-                        if *query_effect != QueryEffect::Delete {
+                    if let Some((query_effect, table_id)) = transact_local_pkey_compat.get(&new_pkey) {
+                        if *query_effect != QueryEffect::Delete && *table_id == query.table {
                             // This transaction will fail every time because the primary key is
                             // already in existance locally - abort permamently
                             return (AbortKind::Permanent, 0);
@@ -332,11 +334,11 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                     }
                     
                     // The query is compatible!
-                    transact_local_pkey_compat.insert(new_pkey, QueryEffect::Create);
+                    transact_local_pkey_compat.insert(new_pkey, (QueryEffect::Create, query.table));
                 }
 
                 // At this point, we know this entire query is compatible!
-                transact_local_pkey_compat.insert(old_primary_key, QueryEffect::Modify);
+                transact_local_pkey_compat.insert(old_primary_key, (QueryEffect::Modify, query.table));
             },
 
             QueryName::Select => {
@@ -366,9 +368,9 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
 
                 // Let's start with the first condition - has this transaction created the primary key?
                 match transact_local_pkey_compat.get(&primary_key) {
-                    Some(effect) => {
+                    Some((effect, table_id)) => {
                         // This transaction has worked on this primary key before! But does it still exist?
-                        if *effect == QueryEffect::Delete {
+                        if *effect == QueryEffect::Delete && *table_id == query.table {
                             // Nope - abort permamently
                             return (AbortKind::Permanent, 0);
                         }
@@ -393,7 +395,7 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
                 }
 
                 // We're good to go!
-                transact_local_pkey_compat.insert(primary_key, QueryEffect::Delete);
+                transact_local_pkey_compat.insert(primary_key, (QueryEffect::Delete, query.table));
             }
         }
     }

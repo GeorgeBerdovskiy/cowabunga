@@ -327,16 +327,41 @@ pub struct Table {
     merge_sender: Option<Sender<MergeRequest>>,
 }
 
+/// Represents a table in Python.
 #[pyclass]
 pub struct PyTableProxy {
+    /// Table identifier.
     #[pyo3(get)]
     pub id: usize,
 
+    /// Number of columns in this table.
     #[pyo3(get)]
     pub num_columns: usize,
 
+    /// Index of primary key column in this table.
     #[pyo3(get)]
-    pub primary_key_index: usize
+    pub primary_key_index: usize,
+
+    #[pyo3(get)]
+    pub index: PyIndexProxy
+}
+
+/// Represents an index in Python.
+#[pyclass]
+#[derive(Clone)]
+pub struct PyIndexProxy;
+
+#[pymethods]
+impl PyIndexProxy {
+    /// Create an index.
+    pub fn create_index(&self, _column_index: usize) {
+        return;
+    }
+
+    /// Drop an index.
+    pub fn drop_index(&self, _column_index: usize) {
+        return;
+    }
 }
 
 /// Represents the indexer of a table.
