@@ -407,6 +407,7 @@ impl BufferPool {
 
         // At this point, we failed to get an empty frame (and there will never be an empty frame again)
         // For this reason, we need to check for a frame that we can evict
+
         /*for i in 0..BP_NUM_FRAMES {
             if Arc::strong_count(&self.frames[i]) - 1 == 0 {
                 // The frame in question is only being used by the buffer pool so we can safely evict it
