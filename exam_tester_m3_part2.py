@@ -5,6 +5,8 @@ from lstore.transaction_worker import TransactionWorker
 
 from random import choice, randint, sample, seed
 
+import copy
+
 db = Database()
 db.open('./ECS165')
 
@@ -12,7 +14,7 @@ db.open('./ECS165')
 grades_table = db.get_table('Grades')
 
 # create a query class for the grades table
-query = Query(grades_table)
+query = Query(db, grades_table)
 
 # dictionary for records to test the database: test directory
 records = {}
@@ -40,7 +42,7 @@ for i in range(number_of_transactions):
     transactions.append(Transaction())
 
 for i in range(num_threads):
-    transaction_workers.append(TransactionWorker())
+    transaction_workers.append(TransactionWorker(db))
 
 
 
@@ -61,15 +63,14 @@ for j in range(number_of_operations_per_record):
         transactions[key % number_of_transactions].add_query(query.update, grades_table, key, *updated_columns)
 print("Update finished")
 
-
+# print(f"There are {len(transaction_workers)} transaction workers")
 # add trasactions to transaction workers  
 for i in range(number_of_transactions):
     transaction_workers[i % num_threads].add_transaction(transactions[i])
 
-
-
 # run transaction workers
 for i in range(num_threads):
+    # print(f"Running worker {i}")
     transaction_workers[i].run()
 
 # wait for workers to finish
@@ -80,7 +81,7 @@ for i in range(num_threads):
 score = len(keys)
 for key in keys:
     correct = records[key]
-    query = Query(grades_table)
+    query = Query(db, grades_table)
     
     result = query.select_version(key, 0, [1, 1, 1, 1, 1], -1)[0].columns
     if correct != result:
@@ -91,11 +92,11 @@ print('Version -1 Score:', score, '/', len(keys))
 v2_score = len(keys)
 for key in keys:
     correct = records[key]
-    query = Query(grades_table)
+    query = Query(db, grades_table)
     
     result = query.select_version(key, 0, [1, 1, 1, 1, 1], -2)[0].columns
     if correct != result:
-        print('select error on primary key', key, ':', result, ', correct:', correct)
+        # print('select error on primary key', key, ':', result, ', correct:', correct)
         v2_score -= 1
 print('Version -2 Score:', v2_score, '/', len(keys))
 if score != v2_score:
@@ -104,7 +105,7 @@ if score != v2_score:
 score = len(keys)
 for key in keys:
     correct = updated_records[key]
-    query = Query(grades_table)
+    query = Query(db, grades_table)
     
     result = query.select_version(key, 0, [1, 1, 1, 1, 1], 0)[0].columns
     if correct != result:
