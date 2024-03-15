@@ -454,13 +454,7 @@ impl Table {
     /// Create a new table given its name, number of columns, primary key column index, and shared
     /// buffer pool manager.
     pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, bpm: Arc<BufferPool>) -> Self {
-        //println!("DEBUG: about to access BPM");
-
-        //println!("DEBUG: trying to register table");
-        // TODO problem here
         let table_identifier = bpm.register_table_name(&name);
-
-        //println!("DEBUG: set bpm dir");
 
         // Create the table directory, every column file inside that table, and the header file for every column
         match std::fs::create_dir(format!("{}/{}", directory, table_identifier)) {
@@ -513,8 +507,6 @@ impl Table {
             }
 
             Err(error) => {
-                //println!("{:?}", error);
-
                 // Table files already exist - load from those disk
                 // Also disregard the `num_columns` and `key_column` arguments
                 let metadata_path = format!("{}/{}/table.hdr", directory, table_identifier);
@@ -1273,7 +1265,6 @@ pub fn start_merge_thread(num_columns: usize, bpm: Arc<BufferPool>) -> Option<Se
                     page_directory,
                 }) => {
                     continue;
-                    println!("[DEBUG] Merge started.");
                     // We'd like to collect relevant physical pages here only _once_
                     let mut physical_base_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; base_pages.len()];
                     let mut physical_tail_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; tail_pages.len()];
@@ -1362,10 +1353,7 @@ pub fn start_merge_thread(num_columns: usize, bpm: Arc<BufferPool>) -> Option<Se
                                         .value();
 
                                     if tail_val.is_none() {
-                                        println!("------");
-                                        panic!("WARNING - Trying to write a `None` value from tail record into base record.\nBase value to be replaced is {:?} @ i = {}, j = {}", physical_bp[i].get_cells()[j], i, j);
-                                        println!("{:?}", physical_tail_pages[tail_addr.page][i]);
-                                        println!("------")
+                                        panic!("ERROR - Trying to write a `None` value from tail record into base record.");
                                     }
 
                                     // Write copy

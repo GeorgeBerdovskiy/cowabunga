@@ -39,8 +39,6 @@ pub struct Transaction {
 impl Transaction {
     #[new]
     pub fn new() -> Self {
-        //println!("[DEBUG] Creating a new transaction!");
-
         Transaction {
             queries: Vec::new(),
             try_count: 0
@@ -61,13 +59,9 @@ impl Transaction {
 
             primary_key_index 
         });
-
-        //println!("{:?}", self.queries);
     }
 
     pub fn add_update(&mut self, table: usize, primary_key_index: usize, primary_key: i64, args: Vec<Option<i64>>) {
-        //println!("[DEBUG] Adding update with prim. key {:?}", primary_key);
-
         self.queries.push(Query {
             query: QueryName::Update,
             table: table,
@@ -81,8 +75,6 @@ impl Transaction {
 
             primary_key_index
         });
-
-        //println!("{:?}", self.queries);
     }
 
     pub fn add_select(&mut self, table: usize, primary_key_index: usize, search_key: i64, search_key_index: i64, projected_columns: Vec<Option<i64>>) {
@@ -99,8 +91,6 @@ impl Transaction {
             
             primary_key_index
         });
-
-        //println!("{:?}", self.queries);
     }
 
     pub fn add_sum(&mut self, table: usize, primary_key_index: usize, start_range: i64, end_range: i64, column_index: i64) {
@@ -117,8 +107,6 @@ impl Transaction {
 
             primary_key_index
         });
-
-        //println!("{:?}", self.queries);
     }
 
     pub fn add_sum_version(&mut self, table: usize, primary_key_index: usize, start_range: i64, end_range: i64, column_index: i64, relative_version: i64) {
@@ -135,8 +123,6 @@ impl Transaction {
 
             primary_key_index
         });
-
-        //println!("{:?}", self.queries);
     }
 
     pub fn add_select_version(&mut self, table: usize, primary_key_index: usize, search_key: i64, search_key_index: i64, proj: Vec<Option<i64>>, relative_version: i64) {
@@ -153,8 +139,6 @@ impl Transaction {
 
             primary_key_index
         });
-
-        //println!("{:?}", self.queries);
     }
 
     pub fn add_delete(&mut self, table: usize, primary_key_index: usize, primary_key: i64) {
@@ -171,7 +155,5 @@ impl Transaction {
 
             primary_key_index
         });
-
-        //println!("{:?}", self.queries);
     }
 }

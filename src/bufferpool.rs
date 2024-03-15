@@ -251,8 +251,6 @@ impl BufferPool {
             next_table_id: self.next_table_id.load(Ordering::SeqCst),
         };
 
-        //println!("{:?}", metadata);
-
         // Next, generate the buffer pool header path
         let metadata_path = format!("{}/bp.hdr", self.directory.read().unwrap());
 

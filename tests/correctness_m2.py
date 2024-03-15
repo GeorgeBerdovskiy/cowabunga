@@ -16,8 +16,8 @@ except:
     print("Didn't need to delete CORRECTNESS_M2 because it doesn't exist")
 
 # Define "constants"
-NUM_COLUMNS = 5
-NUM_INSERTIONS = 50000
+NUM_COLUMNS = 8
+NUM_INSERTIONS = 1000000
 VALUE_MIN = -1000
 VALUE_MAX = 1000
 WRITE_SCRIPT = True
@@ -38,7 +38,7 @@ primary_key_index = choice(range(NUM_COLUMNS))
 db = Database()
 db.open("./CORRECTNESS_M2")
 grades_table = db.create_table('Grades', NUM_COLUMNS, primary_key_index)
-query = Query(grades_table)
+query = Query(db, grades_table)
 
 # Open the script to be generated and write prologue
 if not os.path.exists("tests/generated_scripts"):
@@ -59,7 +59,7 @@ from random import choice, randrange
 
 db = Database()
 grades_table = db.create_table('Grades', {NUM_COLUMNS}, {primary_key_index})
-query = Query(grades_table)
+query = Query(db, grades_table)
 
 """)
 
@@ -361,7 +361,7 @@ print(f"[INFO] Success! Ran {NUM_INSERTIONS} random queries without errors or mi
 db.close()
 db.open("./CORRECTNESS_M2")
 grades_table = db.get_table('Grades')
-query = Query(grades_table)
+query = Query(db, grades_table)
 
 for q in range(NUM_INSERTIONS):
     print(f"[INFO] QUERY {NUM_INSERTIONS + q + 1} / {NUM_INSERTIONS * 2}")
