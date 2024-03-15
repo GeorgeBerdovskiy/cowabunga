@@ -206,18 +206,16 @@ impl Database {
 
     pub fn run_worker(&mut self, transactions: Vec<&PyAny>) -> usize {
         // First, convert the input into something Rust can work on
-        let mut transactions = Python::with_gil(|py| -> PyResult<VecDeque<Transaction>> {
-            transactions
-                .iter()
-                .map(|py_obj| {
-                    // Convert PyObject to PyRef
-                    let py_ref: PyRef<Transaction> = py_obj.extract()?;
-                    // Now, you can use py_ref or convert it to Transaction if your Transaction type supports it
-                    // For example, assuming Transaction implements From<PyRef<Transaction>>
-                    Ok(py_ref.clone())
-                })
-                .collect()
-        }).unwrap();
+        let mut transactions: VecDeque<Transaction> = transactions
+            .iter()
+            .map(|py_obj| {
+                // Convert PyObject to PyRef
+                let py_ref: PyRef<Transaction> = py_obj.extract().unwrap();
+                // Now, you can use py_ref or convert it to Transaction if your Transaction type supports it
+                // For example, assuming Transaction implements From<PyRef<Transaction>>
+                py_ref.clone()
+            })
+            .collect();
 
         let tables_shared = self.tables.clone();
         let transaction_mgr_shared = self.transaction_manager.clone();
