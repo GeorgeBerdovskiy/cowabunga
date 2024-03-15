@@ -34,7 +34,7 @@ struct LogicalPage<T> {
     columns: Vec<PhysicalPageID>,
 
     /// Buffer pool manager shared by all tables.
-    buffer_pool_manager: Arc<Mutex<BufferPool>>,
+    buffer_pool_manager: Arc<BufferPool>,
 
     /// Phantom field for the generic type argument (required since none of the other fields actually use `T`).
     phantom: PhantomData<T>,
@@ -43,9 +43,9 @@ struct LogicalPage<T> {
 /// Methods for all logical pages.
 impl<T> LogicalPage<T> {
     /// Create a new logical page with `num_columns` columns and a shared buffer pool manager.
-    pub fn new(table_id: usize, num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> LogicalPage<T> {
+    pub fn new(table_id: usize, num_columns: usize, buffer_pool_manager: Arc<BufferPool>) -> LogicalPage<T> {
         LogicalPage {
-            columns: buffer_pool_manager.clone().lock().unwrap().allocate_pages(table_id, num_columns),
+            columns: buffer_pool_manager.clone().allocate_pages(table_id, num_columns),
             buffer_pool_manager,
             phantom: PhantomData::<T>,
         }
@@ -61,7 +61,7 @@ impl<T> LogicalPage<T> {
             }
 
             result.push(
-                self.buffer_pool_manager.lock().unwrap().read(self.columns[i], offset)?,
+                self.buffer_pool_manager.read(self.columns[i], offset)?,
             );
         }
 
@@ -79,7 +79,7 @@ impl LogicalPage<Base> {
         // This adds the user's columns, but _not_ the metadata columns
         for (user_column, column_value) in self.columns.iter().zip(columns.iter()) {
             offset = self
-                .buffer_pool_manager.lock().unwrap().write_next_value(*user_column, *column_value)?;
+                .buffer_pool_manager.write_next_value(*user_column, *column_value)?;
         }
 
         // Write the indirection column, which is last
@@ -92,7 +92,7 @@ impl LogicalPage<Base> {
     pub fn update_indirection(&mut self, offset: Offset, new_rid: RID) -> Result<(), DatabaseError> {
         // The columns are _ | _ | ... | INDIRECTION
         let indirection_column = self.columns[self.columns.len() - 1];
-        self.buffer_pool_manager.lock().unwrap().write_value(indirection_column, offset, Some(new_rid as i64))
+        self.buffer_pool_manager.write_value(indirection_column, offset, Some(new_rid as i64))
     }
 }
 
@@ -108,14 +108,10 @@ impl LogicalPage<Tail> {
             .zip(self.columns.iter().take(self.columns.len() - 1))
         {
             offset = self.buffer_pool_manager
-                .lock()
-                .unwrap()
                 .write_next_value(column_value, user_column)?;
         }
 
         self.buffer_pool_manager
-            .lock()
-            .unwrap()
             .write_next_value(self.columns[self.columns.len() - 1], indirection)?;
 
         Ok(offset)
@@ -144,7 +140,7 @@ struct PageRange {
     num_columns: usize,
 
     /// Shared buffer pool manager.
-    buffer_pool_manager: Arc<Mutex<BufferPool>>,
+    buffer_pool_manager: Arc<BufferPool>,
 
     num_updates: usize,
 
@@ -153,7 +149,7 @@ struct PageRange {
 
 impl PageRange {
     /// Create a new page range given the number of columns and a shared buffer pool manager.
-    pub fn new(table_identifier: usize, num_columns: usize, buffer_pool_manager: Arc<Mutex<BufferPool>>) -> Self {
+    pub fn new(table_identifier: usize, num_columns: usize, buffer_pool_manager: Arc<BufferPool>) -> Self {
         let base_page_vec = (0..BASE_PAGES_PER_RANGE)
             .map(|_| LogicalPage::new(table_identifier, num_columns, buffer_pool_manager.clone()))
             .collect();
@@ -318,7 +314,7 @@ pub struct Table {
     next_page_range: AtomicUsize,
 
     /// Buffer pool manager shared by all tables.
-    buffer_pool_manager: Arc<Mutex<BufferPool>>,
+    buffer_pool_manager: Arc<BufferPool>,
 
     /// B-Tree indexes on all columns (except metadata).
     indexer: Arc<RwLock<Indexer>>,
@@ -457,12 +453,12 @@ impl MergeRequest {
 impl Table {
     /// Create a new table given its name, number of columns, primary key column index, and shared
     /// buffer pool manager.
-    pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, BPM: Arc<Mutex<BufferPool>>) -> Self {
+    pub fn new(directory: String, name: String, num_columns: usize, key_column: usize, bpm: Arc<BufferPool>) -> Self {
         //println!("DEBUG: about to access BPM");
 
         //println!("DEBUG: trying to register table");
         // TODO problem here
-        let table_identifier = BPM.lock().unwrap().register_table_name(&name);
+        let table_identifier = bpm.register_table_name(&name);
 
         //println!("DEBUG: set bpm dir");
 
@@ -493,9 +489,9 @@ impl Table {
                 let page_ranges = vec![PageRange::new(
                     table_identifier,
                     num_columns + NUM_METADATA_COLS,
-                    BPM.clone(),
+                    bpm.clone(),
                 )];
-                let merge_sender = start_merge_thread(num_columns, BPM.clone());
+                let merge_sender = start_merge_thread(num_columns, bpm.clone());
                 return Table {
                     directory,
                     name,
@@ -508,7 +504,7 @@ impl Table {
                     page_ranges: Arc::new(RwLock::new(page_ranges)),
                     page_directory: Arc::new(RwLock::new(HashMap::new())),
                     next_page_range: AtomicUsize::new(0),
-                    buffer_pool_manager: BPM.clone(),
+                    buffer_pool_manager: bpm.clone(),
 
                     indexer: Arc::new(RwLock::new(Indexer::new(num_columns))),
                     dead_rids: Arc::new(RwLock::new(Vec::new())),
@@ -530,9 +526,9 @@ impl Table {
 
                 let metadata: TableMetadata = serde_json::from_str(&metadata_string).unwrap();
 
-                let merge_sender = start_merge_thread(metadata.num_columns, BPM.clone());
+                let merge_sender = start_merge_thread(metadata.num_columns, bpm.clone());
                 
-                let BPM_later = BPM.clone();
+                let bpm_later = bpm.clone();
                 return Table {
                     directory,
                     name,
@@ -550,7 +546,7 @@ impl Table {
                                 .iter()
                                 .map(|serialized_base_page| LogicalPage {
                                     columns: serialized_base_page.columns.clone(),
-                                    buffer_pool_manager: BPM.clone(),
+                                    buffer_pool_manager: bpm.clone(),
                                     phantom: PhantomData::<Base>,
                                 })
                                 .collect(),
@@ -559,20 +555,20 @@ impl Table {
                                 .iter()
                                 .map(|serialized_tail_page| LogicalPage {
                                     columns: serialized_tail_page.columns.clone(),
-                                    buffer_pool_manager: BPM.clone(),
+                                    buffer_pool_manager: bpm.clone(),
                                     phantom: PhantomData::<Tail>,
                                 })
                                 .collect(),
                             next_base_page: serialized_range.next_base_page,
                             num_columns: metadata.num_columns + NUM_METADATA_COLS,
-                            buffer_pool_manager: BPM_later.clone(),
+                            buffer_pool_manager: bpm_later.clone(),
                             num_updates: 0,
                             tps: Arc::new(AtomicUsize::new(serialized_range.tps)),
                         })
                         .collect())),
                     page_directory: Arc::new(RwLock::new(metadata.page_directory)),
                     next_page_range: AtomicUsize::new(metadata.next_page_range),
-                    buffer_pool_manager: BPM_later,
+                    buffer_pool_manager: bpm_later,
                     indexer: Arc::new(RwLock::new(metadata.indexer)),
                     dead_rids: Arc::new(RwLock::new(Vec::new())),
                     merge_sender,
@@ -643,8 +639,11 @@ impl Table {
         // provided for _new_ records. For this reason, we wrap them inside `Some` here.
         let mut columns_wrapped: Vec<Option<i64>> = columns.iter().map(|val| Some(*val)).collect();
 
+        // get next_rid AND atomically increment it for future users
+        let next_rid = self.next_rid.fetch_add(1, Ordering::SeqCst);
+
         // Preemtively add the RID of the tail record copy we will add later
-        columns_wrapped.push(Some((self.next_rid.load(Ordering::SeqCst)) as i64));
+        columns_wrapped.push(Some(next_rid as i64));
 
         if columns.len() < self.num_columns {
             return false;
@@ -665,18 +664,19 @@ impl Table {
         let mut page_range_lock = self.page_ranges.write().unwrap();
         let mut page_directory_lock = self.page_directory.write().unwrap();
 
-        match page_range_lock[self.next_page_range.load(Ordering::SeqCst)].insert_base(&columns_wrapped) {
+
+        let cur_page_range = self.next_page_range.load(Ordering::SeqCst);
+
+        match page_range_lock[cur_page_range].insert_base(&columns_wrapped) {
             Ok((page, offset)) => {
                 // Add the new RID to physical address mapping
                 page_directory_lock.insert(
-                    self.next_rid.load(Ordering::SeqCst),
-                    Address::new(self.next_page_range.load(Ordering::SeqCst), page, offset),
+                    next_rid,
+                    Address::new(cur_page_range, page, offset),
                 );
 
-                indexer_wlock.insert(&columns, self.next_rid.load(Ordering::SeqCst));
+                indexer_wlock.insert(&columns, next_rid);
 
-                // Increment the RID for the next record
-                self.next_rid.fetch_add(1, Ordering::SeqCst);
 
                 // Also add the tail record corresponding to this base record
                 drop(indexer_wlock);
@@ -840,25 +840,26 @@ impl Table {
                     }
                 }
 
+
+                // atomically get next_rid and increment it.
+                let new_rid = self.next_rid.fetch_add(1, Ordering::SeqCst);
+
+
                 // Add the new RID to physical address mapping
                 page_directory_lock.insert(
-                    self.next_rid.load(Ordering::SeqCst),
+                    new_rid,
                     Address::new(base_address.range, page, offset),
                 );
 
                 // Update the base record indirection column
                 let result = page_range_lock[base_address.range]
-                    .update_base_indirection(base_address, self.next_rid.load(Ordering::SeqCst));
+                    .update_base_indirection(base_address, new_rid);
 
                 if let Err(_error) = result {
                     // Project specifies that we should return `false` when something goes wrong
                     return false;
                 }
 
-                // Increment the RID for the next record
-                self.next_rid.fetch_add(1, Ordering::SeqCst);
-
-                //println!("[TABLE][861] Successfully updated {:?} to {:?}", key, columns);
                 return true;
             }
 
@@ -1259,7 +1260,7 @@ impl Table {
 }
 
 /// Initializes the internal merge thread.
-pub fn start_merge_thread(num_columns: usize, bpm: Arc<Mutex<BufferPool>>) -> Option<Sender<MergeRequest>> {
+pub fn start_merge_thread(num_columns: usize, bpm: Arc<BufferPool>) -> Option<Sender<MergeRequest>> {
     let (tx, rx) = mpsc::channel::<MergeRequest>();
 
     thread::spawn(move || {
@@ -1289,10 +1290,8 @@ pub fn start_merge_thread(num_columns: usize, bpm: Arc<Mutex<BufferPool>>) -> Op
                         // Grab a copy of the indirection column associated with this logical base page
                         let indirection_column_identifier =
                             logical_bp.columns[num_columns + NUM_METADATA_COLS - 1];
-                        let page = bpm
-                            .lock()
-                            .unwrap()
-                            .request_page(indirection_column_identifier);
+                        let page =
+                            bpm.request_page(indirection_column_identifier);
 
                         // NOTE - We must skip the last cell as it contains the next available offset and NOT an RID
                         for i in 0..page.get_cells().len() - 1 {
@@ -1329,8 +1328,6 @@ pub fn start_merge_thread(num_columns: usize, bpm: Arc<Mutex<BufferPool>>) -> Op
                     for tp_index in tail_page_to_rids.keys() {
                         for i in 0..num_columns {
                             let page = bpm
-                                .lock()
-                                .unwrap()
                                 .request_page(tail_pages[*tp_index].columns[i]);
                             physical_tail_pages[*tp_index][i] = page;
                         }
@@ -1387,9 +1384,7 @@ pub fn start_merge_thread(num_columns: usize, bpm: Arc<Mutex<BufferPool>>) -> Op
                     {
                         // Note that we are NOT writing the indirection column
                         for i in 0..num_columns {
-                            bpm.lock()
-                                .unwrap()
-                                .write_page_masked(corresp_phys_bps[i], logical_bp.columns[i]);
+                            bpm.write_page_masked(corresp_phys_bps[i], logical_bp.columns[i]);
                         }
                     }
 

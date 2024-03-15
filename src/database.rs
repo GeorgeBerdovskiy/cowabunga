@@ -40,7 +40,7 @@ pub struct Database {
     tables: Arc<Mutex<Vec<Table>>>,
 
     /// Buffer pool manager shared by all tables in this database.
-    bpm: Arc<Mutex<BufferPool>>,
+    bpm: Arc<BufferPool>,
 
     /// Describes whether data has been loaded from the disk.
     loaded: bool,
@@ -110,7 +110,7 @@ impl Database {
             directory: Some("./COW_DAT".to_string()),
             tables: Arc::new(Mutex::new(Vec::new())),
             loaded: false,
-            bpm: Arc::new(Mutex::new(BufferPool::new())),
+            bpm: Arc::new(BufferPool::new()),
             next_worker_id: 0,
             running_workers: HashMap::new(),
             transaction_manager: Arc::new(Mutex::new(TransactionManager::new()))
@@ -120,7 +120,7 @@ impl Database {
     /// Set the working directory to `path`.
     pub fn open(&mut self, path: String) {
         self.directory = Some(path.clone());
-        self.bpm.lock().unwrap().set_directory(&path);
+        self.bpm.set_directory(&path);
     }
 
     /// Persist all tables in this directory, as well as its buffer pool manager.
@@ -129,7 +129,7 @@ impl Database {
             table.persist();
         }
 
-        self.bpm.lock().unwrap().persist();
+        self.bpm.persist();
     }
 
     /// Create a new table associated with this database and BPM.
