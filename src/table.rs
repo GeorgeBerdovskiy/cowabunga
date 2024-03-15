@@ -327,6 +327,18 @@ pub struct Table {
     merge_sender: Option<Sender<MergeRequest>>,
 }
 
+#[pyclass]
+pub struct PyTableProxy {
+    #[pyo3(get)]
+    pub id: usize,
+
+    #[pyo3(get)]
+    pub num_columns: usize,
+
+    #[pyo3(get)]
+    pub primary_key_index: usize
+}
+
 /// Represents the indexer of a table.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Indexer {
@@ -1252,7 +1264,7 @@ impl Table {
 }
 
 /// Initializes the internal merge thread.
-pub fn start_merge_thread(num_columns: usize, bpm: Arc<BufferPool>) -> Option<Sender<MergeRequest>> {
+fn start_merge_thread(num_columns: usize, _bpm: Arc<BufferPool>) -> Option<Sender<MergeRequest>> {
     let (tx, rx) = mpsc::channel::<MergeRequest>();
 
     thread::spawn(move || {
@@ -1264,7 +1276,6 @@ pub fn start_merge_thread(num_columns: usize, bpm: Arc<BufferPool>) -> Option<Se
                     tps,
                     page_directory,
                 }) => {
-                    continue;
                     // We'd like to collect relevant physical pages here only _once_
                     let mut physical_base_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; base_pages.len()];
                     let mut physical_tail_pages = vec![vec![Page::new(); num_columns + NUM_METADATA_COLS]; tail_pages.len()];
@@ -1273,16 +1284,14 @@ pub fn start_merge_thread(num_columns: usize, bpm: Arc<BufferPool>) -> Option<Se
                     let mut tail_page_to_rids: HashMap<usize, Vec<RID>> = HashMap::new();
 
                     // Local copy of the TPS that we'll update as we go
-                    let mut temp_tsp = 0;
+                    let mut temp_tps = 0;
 
                     for (logical_bp, physical_bps) in
                         base_pages.iter().zip(physical_base_pages.iter_mut())
                     {
                         // Grab a copy of the indirection column associated with this logical base page
-                        let indirection_column_identifier =
-                            logical_bp.columns[num_columns + NUM_METADATA_COLS - 1];
-                        let page =
-                            bpm.request_page(indirection_column_identifier);
+                        let _idi = logical_bp.columns[num_columns + NUM_METADATA_COLS - 1];
+                        let page = Page::new();
 
                         // NOTE - We must skip the last cell as it contains the next available offset and NOT an RID
                         for i in 0..page.get_cells().len() - 1 {
@@ -1297,8 +1306,8 @@ pub fn start_merge_thread(num_columns: usize, bpm: Arc<BufferPool>) -> Option<Se
                                 };
 
                                 // Keep track of the largest merged tail RID
-                                if tail_rid > temp_tsp {
-                                    temp_tsp = tail_rid;
+                                if tail_rid > temp_tps {
+                                    temp_tps = tail_rid;
                                 }
 
                                 // Index of the logical tail pages holding the _physical_
@@ -1318,8 +1327,8 @@ pub fn start_merge_thread(num_columns: usize, bpm: Arc<BufferPool>) -> Option<Se
                     // Here we are basically grabbing copies of the tail record values we are interested in
                     for tp_index in tail_page_to_rids.keys() {
                         for i in 0..num_columns {
-                            let page = bpm
-                                .request_page(tail_pages[*tp_index].columns[i]);
+                            let page = Page::new(); //bpm
+                                //.request_page(tail_pages[*tp_index].columns[i]);
                             physical_tail_pages[*tp_index][i] = page;
                         }
                     }
@@ -1352,10 +1361,6 @@ pub fn start_merge_thread(num_columns: usize, bpm: Arc<BufferPool>) -> Option<Se
                                         .get_cells()[tail_addr.offset]
                                         .value();
 
-                                    if tail_val.is_none() {
-                                        panic!("ERROR - Trying to write a `None` value from tail record into base record.");
-                                    }
-
                                     // Write copy
                                     physical_bp[i]
                                         .write(j, tail_val)
@@ -1365,18 +1370,7 @@ pub fn start_merge_thread(num_columns: usize, bpm: Arc<BufferPool>) -> Option<Se
                         }
                     }
 
-                    // Lock and unwrap ONCE to ensure nobody else messes around with it while we work on it (may not be needed)
-
-                    for (logical_bp, corresp_phys_bps) in
-                        base_pages.iter().zip(physical_base_pages.iter())
-                    {
-                        // Note that we are NOT writing the indirection column
-                        for i in 0..num_columns {
-                            bpm.write_page_masked(corresp_phys_bps[i], logical_bp.columns[i]);
-                        }
-                    }
-
-                    tps.swap(temp_tsp as usize, Ordering::SeqCst);
+                    tps.swap(temp_tps as usize, Ordering::SeqCst);
                 }
 
                 Err(_) => {

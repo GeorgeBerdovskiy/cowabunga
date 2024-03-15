@@ -14,4 +14,4 @@ pub const INDIRECTION_REV_IDX: usize = 0;
 pub const BP_NUM_FRAMES: usize = 128;
 
 /// Merge threshold.
-pub const THRESHOLD: usize = 1000;
+pub const THRESHOLD: usize = 20000;

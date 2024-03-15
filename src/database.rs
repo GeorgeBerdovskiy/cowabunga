@@ -2,28 +2,22 @@ use pyo3::prelude::*;
 
 use crate::table::{PyRecord, Table};
 use crate::bufferpool::BufferPool;
-use crate::transaction::{self, Transaction, Query, QueryName};
-use std::time::Duration;
-use crate::table::RID;
+use crate::table::PyTableProxy;
+use crate::transactions::{
+    TransactionManager,
+    TransactionID,
+    Transaction,
+    Query, 
+    QueryEffect,
+    QueryName
+};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
-use std::{default, fs};
-
 use std::thread::{self, JoinHandle};
+use std::fs;
 
-#[pyclass]
-pub struct PyTableProxy {
-    #[pyo3(get)]
-    id: usize,
-
-    #[pyo3(get)]
-    num_columns: usize,
-
-    #[pyo3(get)]
-    primary_key_index: usize
-}
-
+/// The kind of abort that should be performed after lock acquisiton attempt.
 #[derive(Debug, PartialEq)]
 pub enum AbortKind {
     Permanent,
@@ -31,6 +25,8 @@ pub enum AbortKind {
     None
 }
 
+/// Represents a database. Wrapped by Python class `Database` and used to route
+/// queries into their respective tables.
 #[pyclass]
 pub struct Database {
     /// Current working directory (changes whenever `open` is called).
@@ -42,55 +38,14 @@ pub struct Database {
     /// Buffer pool manager shared by all tables in this database.
     bpm: Arc<BufferPool>,
 
-    /// Describes whether data has been loaded from the disk.
-    loaded: bool,
-
+    /// Contains all currently running transaction workers, mapping their IDs to their join handles.
     running_workers: HashMap<usize, JoinHandle<()>>,
 
+    /// Next available worker ID.
     next_worker_id: usize,
 
+    /// Shared transaction manager used for record lock acquisition.
     transaction_manager: Arc<Mutex<TransactionManager>>
-}
-
-pub type Counter = usize;
-pub type TransactionID = usize;
-
-struct TransactionManager {
-    transactions_in_process: HashMap<TransactionID, Vec<i64>>,
-    next_transaction_id: TransactionID,
-    pkeys_in_process: HashMap<i64, QueryEffect>,
-}
-
-impl TransactionManager {
-    pub fn new() -> Self {
-        TransactionManager {
-            transactions_in_process: HashMap::new(),
-            next_transaction_id: 0,
-            pkeys_in_process: HashMap::new()
-        }
-    }
-
-    pub fn register_transaction_with(&mut self, pkeys: Vec<i64>) -> TransactionID {
-        self.transactions_in_process.insert(self.next_transaction_id, pkeys);
-        self.next_transaction_id += 1;
-        self.next_transaction_id - 1
-    }
-
-    pub fn release_transaction(&mut self, transaction_id: TransactionID) {
-        let associated_rids = &self.transactions_in_process[&transaction_id];
-
-        for rid in associated_rids {
-            self.pkeys_in_process.remove(rid);
-        }
-    }
-}
-
-#[derive(PartialEq, Debug, Copy, Clone)]
-enum QueryEffect {
-    Create, // Insert queries
-    Modify, // Update queries
-    Read,   // Select, select version, sum, and sum version queries
-    Delete  // Delete
 }
 
 #[pymethods]
@@ -107,7 +62,6 @@ impl Database {
         Database {
             directory: Some("./COW_DAT".to_string()),
             tables: Arc::new(RwLock::new(Vec::new())),
-            loaded: false,
             bpm: Arc::new(BufferPool::new()),
             next_worker_id: 0,
             running_workers: HashMap::new(),
@@ -202,15 +156,13 @@ impl Database {
         self.tables.read().unwrap()[table].delete(primary_key)
     }
 
+    /// Run a transaction worker given its list of transactions (from Python).
     pub fn run_worker(&mut self, transactions: Vec<&PyAny>) -> usize {
         // First, convert the input into something Rust can work on
         let mut transactions: VecDeque<Transaction> = transactions
             .iter()
             .map(|py_obj| {
-                // Convert PyObject to PyRef
                 let py_ref: PyRef<Transaction> = py_obj.extract().unwrap();
-                // Now, you can use py_ref or convert it to Transaction if your Transaction type supports it
-                // For example, assuming Transaction implements From<PyRef<Transaction>>
                 py_ref.clone()
             })
             .collect();
@@ -219,14 +171,6 @@ impl Database {
         let transaction_mgr_shared = self.transaction_manager.clone();
 
         let new_worker = thread::spawn(move || {
-            let mut query_count = 0;
-
-            for transaction in &transactions {
-                for query in &transaction.queries {
-                    query_count += 1;
-                }
-            }
-
             // Next, we will continuously pop and check if we can run the transaction
             // If we can, we'll send it to the "run_transaction" function. Otherwise,
             // we'll send it to the back of the queue
@@ -238,7 +182,7 @@ impl Database {
                 if abort_kind == AbortKind::Temporary {
                     // If we've failed three or more times, don't try it again
                     if next_transaction.try_count < 10 {
-                        // We've failed less than three (or four ??) times
+                        // We've failed less than ten times - retry another time
                         let transaction_retry = Transaction {
                             queries: next_transaction.queries.clone(),
                             try_count: next_transaction.try_count + 1
@@ -254,7 +198,6 @@ impl Database {
                     }
 
                     transaction_mgr_shared.lock().unwrap().release_transaction(transaction_id);
-
                 }
             }
         });
@@ -265,6 +208,7 @@ impl Database {
         self.next_worker_id - 1
     }
 
+    /// Waits for a transaction worker to finish and then returns.
     pub fn join_worker(&mut self, worker_id: usize) {
         let worker = self.running_workers.remove(&worker_id);
         if worker.is_some() {
@@ -273,8 +217,9 @@ impl Database {
     }
 }
 
-/// Confirm that this transaction is compatible with all currently running queries
-// TODO - Refactor this to return an enum or something... this is hacky and unpleasant
+/// Confirm that this transaction is compatible with all currently running queries. If it is, acquire locks on all
+/// requested records. Only one transaction can check for compatability and acquire locks at a time.
+// TODO - Refactor this to return an enum... this is hacky and unpleasant
 pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transaction_mgr: Arc<Mutex<TransactionManager>>, transaction: Transaction) -> (AbortKind, TransactionID) {
     // Acquire transaction manager lock
     let mut transact_mgr_lock = transaction_mgr.lock().unwrap();
@@ -395,20 +340,19 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
             },
 
             QueryName::Select => {
-                // Technically, select is always good because it can't violate integrity constraints. Since
-                // we don't need to handle phantoms in this milestone, we choose to add it anyways.
+                // TODO
             },
 
             QueryName::Sum => {
-                // Again, sum is always good because it can't violate integrity constraints
+                // TODO
             },
 
             QueryName::SumVersion => {
-                // Again, sum (version) is always good because it can't violate integrity constraints
+                // TODO
             },
 
             QueryName::SelectVersion => {
-                // Again, select (version) is always good because it can't violate integrity constraints
+                // TODO
             },
 
             QueryName::Delete => {
@@ -470,6 +414,7 @@ pub fn confirm_transaction_compatability(tables: Arc<RwLock<Vec<Table>>>, transa
     (AbortKind::None, id)
 }
 
+/// Run a single query.
 pub fn run_query(tables: Arc<RwLock<Vec<Table>>>, query: Query) {
     let table = &tables.read().unwrap()[query.table];
 

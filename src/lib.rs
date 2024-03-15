@@ -7,7 +7,7 @@ pub mod errors;
 pub mod persistables;
 pub mod database;
 
-pub mod transaction;
+pub mod transactions;
 
 #[pymodule]
 fn buffer_pool_module(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -35,7 +35,7 @@ fn record_type_module(_py: Python, m: &PyModule) -> PyResult<()> {
 
 #[pymodule]
 fn transaction_module(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_class::<transaction::Transaction>()?;
+    m.add_class::<transactions::Transaction>()?;
     Ok(())
 }
 

@@ -406,38 +406,6 @@ impl BufferPool {
         // At this point, we failed to get an empty frame (and there will never be an empty frame again)
         // For this reason, we need to check for a frame that we can evict
 
-        /*for i in 0..BP_NUM_FRAMES {
-            if Arc::strong_count(&self.frames[i]) - 1 == 0 {
-                // The frame in question is only being used by the buffer pool so we can safely evict it
-                // First, get a write lock on it
-                let mut frame = self.frames[i].write().unwrap();
-
-                // Now let's remove it from the page map
-                let mut page_map_lock = self.page_map.write().unwrap();
-                page_map_lock.remove(&frame.id.unwrap());
-
-                if frame.dirty {
-                    // We need to write this frame before evicting it
-                    self.write_page_to_disk(frame.page.unwrap(), frame.id.unwrap());
-                }
-
-                // Now we can safely overwrite this frame
-                // Let's start by grabbing the requested page from the disk
-                let page = self.get_page_from_disk(global_page_index);
-
-                frame.page = Some(page);
-                frame.empty = false;
-                frame.dirty = false;
-                frame.id = Some(global_page_index);
-
-                // Next, let's update the page map with the newly retrieved and loaded page
-                page_map_lock.entry(global_page_index).or_insert(i);
-
-                // Finally, return the index of the frame that now holds this page
-                return i;
-            }
-        }*/
-
         // At this point, we did not find a page that could be evicted either. For that reason,
         // let's just latch onto a random frame until it no longer has any pins
         let random_frame_index = rand::thread_rng().gen_range(0..BP_NUM_FRAMES);
@@ -495,52 +463,6 @@ impl BufferPool {
                 // This page isn't in the buffer pool yet - grab it and try again
                 let index = self.bring_page_into_pool(id);
                 return self.frames[index].read().unwrap().page.unwrap();
-            }
-        }
-    }
-
-    /// Write to a page but ignore `None` values and the last cell, which contains the next available slot.
-    // TODO: check that this is thread safe
-    pub fn write_page_masked(&self, page: Page, id: PhysicalPageID) {
-        let mut modified_cells = [Cell::empty(); CELLS_PER_PAGE];
-
-        let mut i = 0;
-        for cell in page.cells {
-            if cell.value().is_none() || i == CELLS_PER_PAGE - 1 {
-                break;
-            }
-
-            modified_cells[i] = cell;
-            i += 1;
-        }
-
-        match self.get_frame_by_ppid(id) {
-            Some(frame_ref) => {
-                // This page is already in the buffer pool - write to it
-                let mut frame = frame_ref.write().unwrap();
-                frame.dirty = true;
-
-                while i < CELLS_PER_PAGE {
-                    modified_cells[i].0 = frame.page.unwrap().cells[i].0;
-                    i += 1;
-                }
-
-                frame.page = Some(Page::from_data(modified_cells));
-            },
-
-            None => {
-                // This page isn't in the buffer pool yet - grab it and try again
-                let index = self.bring_page_into_pool(id);
-
-                let mut frame = self.frames[index].write().unwrap();
-                frame.dirty = true;
-                
-                while i < CELLS_PER_PAGE {
-                    modified_cells[i].0 = frame.page.unwrap().cells[i].0;
-                    i += 1;
-                }
-
-                frame.page = Some(Page::from_data(modified_cells));
             }
         }
     }
